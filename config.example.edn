@@ -1,0 +1,28 @@
+;; Copy to config.edn (gitignored) and adapt to your project.
+{:title "Clojure nREPL console"
+
+ ;; Namespace each browser tab's nREPL session starts in.
+ :home-ns "user"
+
+ ;; Path to a Clojure file whose top-level (comment ...) forms become snippets in the
+ ;; quick-access pane, grouped by theme (see `themes` in replweb.clj). Optional.
+ :notebook nil
+
+ ;; [title code] pairs pinned at the top of quick access, e.g. shortcuts to hot-reloadable
+ ;; config vars in your app. Evaluating one just prints the value; its inspect button opens
+ ;; it in the tree.
+ :quick-access [["Example config var" "(some.app.config/settings)"]]
+ :quick-access-theme "quick access"
+
+ ;; [title pattern] pairs grouping the notebook's snippets in the quick-access pane - first
+ ;; match wins, so put narrow patterns before broad catch-alls. `pattern` is a regex as a
+ ;; string (not a #"..." literal - config.edn is read with clojure.edn, which doesn't have
+ ;; that syntax). Optional - defaults to a generic set covering DB/HTTP/jobs/cache/etc; set
+ ;; this to tailor it to your own app's vocabulary (internal service names, integration
+ ;; partners, whatever your snippets actually mention).
+ :themes [["Database"     "(?i)\\bdao\\b|\\bsql\\b|transaction|hibernate"]
+          ["HTTP & APIs"  "(?i)\\bhttp\\b|endpoint|\\brest\\b|webhook"]]
+
+ ;; Snippets to try before anything else has run.
+ :starters ["(+ 1 2 3)"
+            "(tap> (System/getProperties))"]}

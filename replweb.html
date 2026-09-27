@@ -1,0 +1,1638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clojure nREPL console</title>
+<!-- Enforced, not just avoided: everything here is same-origin (relative fetches to the
+     bridge, inline style/script) - 'self' blocks any external network call the browser could
+     otherwise make, even one introduced by a future bug. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; font-src 'self'; frame-ancestors 'none'; form-action 'self'">
+<style>
+  :root {
+    --paper:#F3F1EB; --card:#FBFAF6; --sunk:#EDEAE1; --ink:#2B2722; --ink-dim:#6C6459;
+    --line:#E3DED2; --coral:#C4633F; --coral-wash:#EEE1D9;
+    --value:#4C7A55; --danger:#A93A34; --danger-wash:#F1E1DC;
+    --tap:#7A5EA8; --tap-wash:#E8E2F0;
+    --pending:#3E7CB8; --pending-2:#7FB3E0;
+    --s-kw:#B25A2E; --s-str:#4F6E8C; --s-num:#6E7A3E; --s-cmt:#9A9284; --s-paren:#A9A192;
+    /* rainbow nesting: 6 hues walked round-robin by depth, muted enough to sit under the
+       token colours rather than compete with them */
+    --p0:#9C7B4E; --p1:#5E8A78; --p2:#8B6FA8; --p3:#B0724A; --p4:#4F7E9E; --p5:#8A8544;
+    --serif:Georgia,"Times New Roman",serif;
+    --ui:system-ui,-apple-system,"Segoe UI",sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+
+    /* One motion language, used everywhere. --e-out overshoots a hair then settles, which
+       reads as "arrived" rather than "slid"; --e-in is for things leaving. Distances stay
+       under 6px and scales within 2% - at this size, more reads as noise. */
+    --e-out:cubic-bezier(.2,.9,.25,1); --e-in:cubic-bezier(.4,0,.7,.2);
+    --t-micro:90ms;   /* hover, press */
+    --t-state:160ms;  /* a thing changed state */
+    --t-enter:240ms;  /* a thing arrived */
+    --t-panel:300ms;  /* a surface opened */
+
+    /* Glass tokens. These must never be derived from --ink: --ink flips to near-white in
+       dark mode, and a shadow built from it renders as a halo instead of a shadow. */
+    --glass-hi:rgba(255,255,255,.85);   /* top specular edge */
+    --glass-lo:rgba(0,0,0,.05);         /* bottom inner edge */
+    --sh-1:rgba(60,50,40,.10);
+    --sh-2:rgba(60,50,40,.22);
+  }
+  @media (prefers-color-scheme:dark) {
+    :root {
+      --paper:#21201D; --card:#2A2926; --sunk:#1B1A18; --ink:#E9E5DC; --ink-dim:#9A9184;
+      --line:#38352F; --coral:#D97F5B; --coral-wash:#3A2C24;
+      --value:#7FB088; --danger:#E0756C; --danger-wash:#3A2624;
+      --tap:#A98FD4; --tap-wash:#2E2838;
+      --pending:#6BA8DE; --pending-2:#9CC7EC;
+      --s-kw:#D98A5B; --s-str:#8FB0CE; --s-num:#A9B36E; --s-cmt:#7C7568; --s-paren:#6C6559;
+      --p0:#C9A46B; --p1:#7FB49C; --p2:#B294D4; --p3:#DB9166; --p4:#79A9CB; --p5:#B5AE63;
+      --glass-hi:rgba(255,255,255,.10);
+      --glass-lo:rgba(0,0,0,.28);
+      --sh-1:rgba(0,0,0,.34);
+      --sh-2:rgba(0,0,0,.55);
+    }
+  }
+  * { box-sizing:border-box; margin:0; }
+  html,body { height:100%; }
+  body {
+    background:var(--paper); color:var(--ink); font-family:var(--mono);
+    font-size:13.5px; line-height:1.6; display:flex; flex-direction:column;
+    -webkit-font-smoothing:antialiased; overflow:hidden;
+  }
+
+  /* ── identity bar ──────────────────────────────────────────────── */
+  header {
+    flex:none; background:var(--card); border-bottom:1px solid var(--line);
+    padding:11px 20px 12px; display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 26px;
+    transition:background .25s, border-color .25s;
+  }
+  header.prod { background:var(--danger-wash); border-bottom-color:var(--danger); }
+  .field { display:flex; align-items:baseline; gap:8px; }
+  .field .k { font-family:var(--serif); font-size:13px; font-style:italic; color:var(--ink-dim); letter-spacing:.02em; }
+  header.prod .field .k { color:var(--danger); }
+  .field .v { font-family:var(--mono); font-size:12.5px; color:var(--ink); }
+  .spacer { flex:1; }
+  .status { display:flex; align-items:center; gap:7px; font-family:var(--ui); font-size:11px; color:var(--ink-dim); }
+  .dot {
+    width:7px; height:7px; border-radius:50%; background:var(--value);
+    animation:breathe 3.4s var(--e-out) infinite;   /* the connection is alive, not just green */
+  }
+  @keyframes breathe {
+    0%,100% { 
+      opacity:1; 
+      transform:scale(1);
+      box-shadow:0 0 0 0 transparent;
+    }
+    50% { 
+      opacity:.7; 
+      transform:scale(1.05);
+      box-shadow:0 0 0 4px color-mix(in srgb, var(--value) 20%, transparent);
+    }
+  }
+  .status.down .dot { background:var(--danger); animation-duration:1s; }
+  .status.down { color:var(--danger); }
+  
+  .field .v.flash {
+    animation:flash .8s var(--e-out) both;
+  }
+  @keyframes flash {
+    0% { 
+      background:var(--coral-wash);
+      box-shadow:0 0 0 0 var(--coral-wash);
+      transform:scale(1.02);
+    }
+    100% {
+      background:transparent;
+      box-shadow:0 0 0 4px transparent;
+      transform:scale(1);
+    }
+  }
+  .prod-chip {
+    font-family:var(--ui); font-size:10.5px; font-weight:600; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--danger); border:1px solid var(--danger);
+    border-radius:3px; padding:1px 6px; display:none;
+  }
+  header.prod .prod-chip { display:inline-block; }
+  .toggle {
+    font-family:var(--ui); font-size:11px; color:var(--ink-dim); background:none;
+    border:1px solid var(--line); border-radius:4px; padding:3px 9px; cursor:pointer;
+    transition:color var(--t-micro), border-color var(--t-micro),
+               background var(--t-micro), transform var(--t-micro) var(--e-out),
+               box-shadow var(--t-micro) var(--e-out);
+  }
+  .toggle:hover {
+    color:var(--ink); 
+    border-color:var(--ink-dim); 
+    transform:translateY(-1px);
+    box-shadow:0 2px 8px color-mix(in srgb, currentColor 12%, transparent);
+  }
+  .toggle:active { transform:translateY(1px); box-shadow:0 1px 4px color-mix(in srgb, currentColor 10%, transparent); }
+  .toggle.on { color:var(--tap); border-color:var(--tap); background:var(--tap-wash); }
+  .toggle .count { font-weight:600; display:inline-block; }
+  /* retriggered from JS on each new tap, so the badge registers even with the rail closed */
+  .toggle .count.bump { animation:bump 420ms var(--e-out); }
+  @keyframes bump {
+    0% { transform:scale(1); } 35% { transform:scale(1.5); color:var(--tap); } 100% { transform:scale(1); }
+  }
+
+  /* ── body : quick access | transcript + dock | inspector ──────── */
+  .panes { flex:1; display:flex; min-height:0; }
+  /* only the centre column carries the input dock; the two side panes run the full height */
+  .center { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
+  main { flex:1; overflow-y:auto; padding:0 20px 8px; min-width:0; scroll-behavior:smooth;
+         transition:background var(--t-panel); }
+  .wrap { max-width:none; margin:0 auto; }
+
+  /* the middle pane gets the same kind of head as the two side panes */
+  .hist-head {
+    position:sticky; top:0; z-index:3; display:flex; align-items:baseline; gap:10px;
+    margin:0 -20px 16px; padding:12px 20px 11px;
+    background:color-mix(in srgb, var(--paper) 88%, transparent); backdrop-filter:blur(4px);
+    border-bottom:1px solid var(--line);
+  }
+  .hist-head .ttl { font-family:var(--serif); font-style:italic; font-size:15px; color:var(--ink-dim); }
+  .hist-head .hist-clear {
+    margin-left:auto; font-family:var(--ui); font-size:10.5px; color:var(--ink-dim);
+    background:none; border:1px solid var(--line); border-radius:4px; padding:2px 9px; cursor:pointer;
+    transition:color var(--t-micro), border-color var(--t-micro),
+               background var(--t-micro), transform var(--t-micro) var(--e-out);
+  }
+  .hist-head .hist-clear:hover:not(:disabled) {
+    color:var(--danger); border-color:var(--danger); background:var(--danger-wash); transform:translateY(-1px);
+  }
+  .hist-head .hist-clear:disabled { opacity:.4; cursor:default; }
+
+  /* left pane — same slide mechanism as the inspector, mirrored to the left edge */
+  .qa {
+    flex:none; width:308px; overflow:hidden; background:var(--sunk);
+    border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0;
+    transition:width var(--t-panel) var(--e-out), border-right-color var(--t-panel);
+  }
+  .qa.collapsed { width:0; border-right-color:transparent; }
+  .qa > * { min-width:308px; }
+  .qa h2 {
+    font-family:var(--serif); font-style:italic; font-size:15px; font-weight:400;
+    color:var(--coral); padding:12px 16px 10px; border-bottom:1px solid var(--line);
+    display:flex; align-items:baseline; gap:8px;
+  }
+  .qa h2 .hint2 { font-family:var(--ui); font-style:normal; font-size:10.5px; color:var(--ink-dim); margin-left:auto; cursor:pointer; transition:color var(--t-micro); }
+  .qa h2 .hint2:hover { color:var(--ink); }
+  /* the pane reads as three zones by surface, not just by hairline: search + themes sit on
+     --card, the snippet list drops back to the pane's --sunk, the divider gets a soft shadow */
+  .qa-search {
+    display:flex; align-items:center; gap:8px; padding:10px 14px; background:var(--card);
+    border-bottom:1px solid var(--line);
+  }
+  .qa-search input {
+    flex:1; background:none; border:none; outline:none; color:var(--ink);
+    font-family:var(--mono); font-size:13px; caret-color:var(--coral);
+  }
+  .qa-search .n { font-family:var(--ui); font-size:10px; color:var(--ink-dim); white-space:nowrap; }
+  .qa-search .qclr {
+    font-family:var(--ui); font-size:10px; color:var(--coral); cursor:pointer;
+    white-space:nowrap; transition:opacity var(--t-micro);
+  }
+  .qa-search .qclr:hover { opacity:.7; }
+
+  .qa-themes {
+    background:var(--card);
+    border-bottom:1px solid var(--line);
+    box-shadow:0 2px 6px -4px color-mix(in srgb, var(--ink) 40%, transparent);
+  }
+  .qa-themes-lbl {
+    font-family:var(--serif); font-style:italic; font-size:12px; color:var(--ink-dim);
+    letter-spacing:.02em; padding:8px 14px 0; display:flex; align-items:baseline; gap:8px;
+  }
+  .qa-themes-lbl .tclr {
+    font-family:var(--ui); font-style:normal; font-size:10px; color:var(--coral);
+    cursor:pointer; margin-left:auto; transition:opacity var(--t-micro);
+  }
+  .qa-themes-lbl .tclr:hover { opacity:.7; }
+  .qa .chips {
+    display:flex; flex-wrap:wrap; gap:5px; padding:8px 14px 11px;
+    max-height:108px; overflow-y:auto;
+  }
+  .qa-list { flex:1; overflow-y:auto; min-height:0; background:var(--sunk); }
+  .qa-foot {
+    flex:none; display:flex; flex-wrap:wrap; gap:10px; padding:8px 14px; border-top:1px solid var(--line);
+    font-family:var(--ui); font-size:10px; color:var(--ink-dim);
+  }
+  .qa-foot .warn { color:var(--coral); }
+  .qa-none { padding:22px 14px; font-family:var(--ui); font-size:12px; color:var(--ink-dim); }
+
+  /* width, not display, so the panel can actually slide; children keep their full width so
+     the text inside does not reflow while it moves */
+  aside {
+    flex:none; width:0; overflow:hidden; background:var(--sunk);
+    border-left:1px solid transparent; display:flex; flex-direction:column; min-height:0;
+    transition:width var(--t-panel) var(--e-out), border-left-color var(--t-panel);
+  }
+  aside.open { width:440px; border-left-color:var(--line); }
+  aside > * { min-width:440px; }
+  aside h2 {
+    font-family:var(--serif); font-style:italic; font-size:15px; font-weight:400;
+    color:var(--tap); padding:12px 16px 10px; border-bottom:1px solid var(--line);
+    display:flex; align-items:baseline; gap:8px;
+  }
+  aside h2 .hint2 { font-family:var(--ui); font-style:normal; font-size:10.5px; color:var(--ink-dim); margin-left:auto; cursor:pointer; transition:color var(--t-micro); }
+  aside h2 .hint2 + .hint2 { margin-left:0; }
+  aside h2 .hint2:hover { color:var(--ink); }
+  .taps { flex:1; overflow-y:auto; padding:2px 0 14px; }
+  .tap-empty { padding:16px; font-family:var(--ui); font-size:12px; color:var(--ink-dim); line-height:1.7; }
+  .tap-empty code { font-family:var(--mono); color:var(--tap); }
+
+  /* one tapped value = one collapsible root; it slides in from the right edge it arrived at */
+  .tap-item { border-bottom:1px solid var(--line); padding:5px 0 7px; animation:tapIn var(--t-enter) var(--e-out) both; }
+  @keyframes tapIn { from { opacity:0; transform:translateX(10px); } }
+  .tap-item .when { font-family:var(--ui); font-size:9.5px; color:var(--ink-dim); padding:0 14px 2px 10px; }
+
+  /* tree */
+  .node {
+    display:flex; align-items:baseline; gap:7px; padding:2px 14px 2px 10px; cursor:default;
+    transition:background var(--t-micro);
+  }
+  .node.branch { cursor:pointer; transition:transform var(--t-micro) var(--e-out); }
+  .node.branch:hover { background:var(--coral-wash); transform:translateX(3px); }
+  .node.branch:hover > .tw { color:var(--coral); }
+  .tw {
+    flex:none; width:13px; text-align:center; color:var(--ink-dim); font-size:9px;
+    user-select:none; transition:color var(--t-micro);
+  }
+  /* one glyph that turns, rather than two that swap - the rotation is the state change */
+  .node.branch > .tw::before {
+    content:"\25B8"; display:inline-block;
+    transition:transform var(--t-state) var(--e-out);
+  }
+  .node.branch.open > .tw::before { transform:rotate(90deg); }
+  .lbl { flex:none; color:var(--s-kw); }
+  .prev { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--ink-dim); }
+  .kind {
+    flex:none; font-family:var(--ui); font-size:9px; letter-spacing:.03em; color:var(--ink-dim);
+    border:1px solid var(--line); border-radius:3px; padding:0 4px;
+    transition:color var(--t-micro), border-color var(--t-micro);
+  }
+  .node:hover > .kind { color:var(--ink); border-color:var(--ink-dim); }
+  .kids { border-left:1px solid var(--line); margin-left:16px; }
+  /* children cascade in; the delay is set inline per row and capped, so a 200-child map
+     finishes its entrance in well under a second */
+  .kids > * { animation:kidIn var(--t-enter) var(--e-out) both; }
+  @keyframes kidIn { from { opacity:0; transform:translateX(-5px); } }
+  .cls { font-family:var(--ui); font-size:10px; color:var(--ink-dim); padding:2px 14px 4px 30px; }
+  .more { font-family:var(--ui); font-size:10px; color:var(--ink-dim); padding:2px 14px 4px 30px; font-style:italic; }
+  .more.loading { animation:shimmer 1.1s ease-in-out infinite; }
+  @keyframes shimmer { 0%,100% { opacity:.35; } 50% { opacity:.85; } }
+
+  /* ── transcript ─────────────────────────────────────────────────── */
+  .block { margin-bottom:26px; animation:rise var(--t-enter) var(--e-out) both; }
+  /* rows brought back from storage were not just evaluated - 200 staggered entrances would
+     read as noise, and the same goes for the rail */
+  .block.restored, .tap-item.restored { animation:none; }
+  .tap-item.stale { opacity:.6; }
+  .tap-item.stale .prev { font-style:italic; }
+  @keyframes rise { from { opacity:0; transform:translateY(6px); } }
+  .form {
+    white-space:pre-wrap; word-break:break-word; cursor:pointer;
+    border-radius:5px; padding:1px 5px; margin:-1px -5px;
+    transition:background var(--t-micro),
+               transform var(--t-micro) var(--e-out);
+  }
+  .form:hover { 
+    background:color-mix(in srgb, var(--coral-wash) 50%, transparent);
+    transform:translateX(2px);
+  }
+  .form .caret {
+    color:var(--coral); user-select:none; margin-right:9px; font-weight:700;
+    display:inline-block; transition:transform var(--t-state) var(--e-out);
+  }
+  .form:hover .caret { transform:translateX(2px); }         /* "click me to reload" */
+  .form.running .caret { animation:runCaret 1s var(--e-out) infinite; }
+  @keyframes runCaret { 0%,100% { opacity:1; transform:translateX(0); } 50% { opacity:.3; transform:translateX(2px); } }
+
+  .stream {
+    white-space:pre-wrap; word-break:break-word; margin:6px 0 0 3px;
+    padding-left:13px; border-left:2px solid var(--line); color:var(--ink-dim);
+    animation:streamIn var(--t-state) var(--e-out) both;
+  }
+  @keyframes streamIn { from { opacity:0; } }
+  .stream.err { border-left-color:var(--danger); color:var(--danger); }
+
+  .result {
+    margin:7px 0 0 3px; padding-left:13px; border-left:2px solid var(--value);
+    display:flex; gap:14px; align-items:baseline;
+    animation:resultIn var(--t-enter) var(--e-out) both;
+  }
+  /* the border-colour resolves from the semantic class, so wipe it in from length 0 */
+  @keyframes resultIn { from { opacity:0; transform:translateY(3px); } }
+  .result .val { flex:1; white-space:pre-wrap; word-break:break-word; color:var(--ink); max-height:55vh; overflow-y:auto; }
+  .result .ms { font-family:var(--ui); font-size:11px; color:var(--ink-dim); white-space:nowrap; }
+  .insp {
+    font-family:var(--ui); font-size:10.5px; color:var(--tap); background:none;
+    border:1px solid var(--line); border-radius:4px; padding:1px 7px; cursor:pointer;
+    /* dim rather than hidden: hover-only would make it undiscoverable */
+    white-space:nowrap; opacity:.4;
+    transition:opacity var(--t-micro), transform var(--t-micro) var(--e-out),
+               border-color var(--t-micro), background var(--t-micro);
+  }
+  .block:hover .insp, .insp:focus-visible { opacity:1; }
+  .insp:hover:not(:disabled) {
+    border-color:var(--tap); 
+    background:var(--tap-wash);
+    transform:translateX(4px);
+  }
+  .insp:disabled { color:var(--ink-dim); cursor:default; }
+  .result.ex { border-left-color:var(--danger); }
+  .result.ex .val { color:var(--danger); }
+  .result.stopped { border-left-color:var(--ink-dim); }
+  .result.stopped .val { color:var(--ink-dim); font-style:italic; }
+
+  .t-str { color:var(--s-str); } .t-kw { color:var(--s-kw); } .t-num { color:var(--s-num); }
+  .t-cmt { color:var(--s-cmt); font-style:italic; } .t-par { color:var(--s-paren); }
+  .p0 { color:var(--p0); } .p1 { color:var(--p1); } .p2 { color:var(--p2); }
+  .p3 { color:var(--p3); } .p4 { color:var(--p4); } .p5 { color:var(--p5); }
+  .unbal { color:var(--danger); background:var(--danger-wash); border-radius:2px; }
+
+  /* ── input composer ─────────────────────────────────────────────── */
+  /* the footer is a translucent shelf: content scrolls up behind it, blurred, and a soft
+     wash rises from the bottom edge instead of a hard rule */
+  footer {
+    flex:none; padding:14px 20px 14px; position:relative;
+    background:color-mix(in srgb, var(--paper) 78%, transparent);
+    backdrop-filter:blur(16px) saturate(1.35);
+    -webkit-backdrop-filter:blur(16px) saturate(1.35);
+    border-top:1px solid color-mix(in srgb, var(--line) 65%, transparent);
+  }
+  /* content fades out under the shelf instead of hitting a lit edge - the old glow read as a
+     white halo in dark mode, because it was mixed from --ink */
+  footer::before {
+    content:""; position:absolute; left:0; right:0; bottom:100%; height:34px;
+    background:linear-gradient(to top, var(--paper), transparent);
+    pointer-events:none; opacity:.85;
+  }
+  .arglist {
+    margin:0 auto 6px; min-height:0; height:20px; display:flex; align-items:center;
+    font-family:var(--mono); font-size:12px; color:var(--ink-dim);
+    overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
+    opacity:0; transform:translateY(3px); transition:opacity var(--t-state), transform var(--t-state) var(--e-out);
+  }
+  .arglist:not(:empty) { opacity:1; transform:none; }
+  .arglist b { color:var(--coral); font-weight:500; margin-right:8px; }
+
+  /* One glass shell holds the editor and the send button. The shell owns the focus ring, so
+     the two never look independently focused, and the button sits on the baseline of the
+     last line rather than stretching into a slab. */
+  .dock {
+    position:relative; isolation:isolate;
+    margin:0 auto; display:flex; gap:9px; align-items:flex-end;
+    padding:8px 8px 8px 16px; border-radius:20px;
+    background:linear-gradient(180deg,
+              color-mix(in srgb, var(--card) 90%, transparent),
+              color-mix(in srgb, var(--card) 68%, transparent));
+    backdrop-filter:blur(20px) saturate(1.7);
+    -webkit-backdrop-filter:blur(20px) saturate(1.7);
+    border:1px solid color-mix(in srgb, var(--line) 90%, transparent);
+    box-shadow:inset 0 1px 0 var(--glass-hi),
+               inset 0 -1px 0 var(--glass-lo),
+               0 1px 2px var(--sh-1),
+               0 12px 30px -22px var(--sh-2);
+    transition:border-color var(--t-state), box-shadow var(--t-state),
+               transform var(--t-state) var(--e-out);
+  }
+  /* the specular sweep: a soft highlight that wipes across the glass once on focus */
+  .dock::after {
+    content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
+    background:linear-gradient(105deg, transparent 38%,
+              color-mix(in srgb, var(--coral) 18%, transparent) 50%, transparent 62%);
+    opacity:0; transform:translateX(-30%);
+  }
+  .dock:focus-within::after { animation:sheen 900ms var(--e-out) both; }
+  /* Pending state: a thin conic ring chases around the shell while an eval is in flight -
+     a glow you notice in peripheral vision, unlike the disabled send button alone (which
+     just reads as "broken" until you look straight at it). */
+  @property --dock-ang { syntax:'<angle>'; inherits:false; initial-value:0deg; }
+  /* Blue, not coral: coral already means focus/hover/send everywhere else in this UI, so
+     pending gets its own hue - the eye reads "this is a different kind of state" instantly,
+     without having to parse the shape of the glow to tell it apart from a focus ring. */
+  .dock.running {
+    border-color:color-mix(in srgb, var(--pending) 55%, transparent);
+  }
+  /* Unlike .running (only true while an eval is in flight), this reflects the buffer itself,
+     so it must win over the focus ring - typing is exactly when the dock is focused. A
+     border tint alone read as barely-there; this needs to be obvious in peripheral vision,
+     the same bar .running clears for an in-flight eval. */
+  .dock.syntax-bad, .dock.syntax-bad:focus-within {
+    border-color:var(--danger);
+    background:linear-gradient(180deg,
+              color-mix(in srgb, var(--danger-wash) 65%, var(--card)),
+              color-mix(in srgb, var(--danger-wash) 40%, var(--card)));
+    box-shadow:inset 0 1px 0 var(--glass-hi),
+               inset 0 -1px 0 var(--glass-lo),
+               0 0 0 3px color-mix(in srgb, var(--danger) 28%, transparent),
+               0 16px 38px -22px color-mix(in srgb, var(--danger) 60%, transparent);
+  }
+  .dock.running::before {
+    content:""; position:absolute; inset:-1.5px; z-index:-1; border-radius:inherit; padding:1.5px;
+    background:conic-gradient(from var(--dock-ang),
+              transparent 0 62%,
+              var(--pending-2) 78%,
+              transparent 92%);
+    -webkit-mask:linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite:xor; mask-composite:exclude;
+    animation:dockSpin 1.4s linear infinite;
+    pointer-events:none;
+  }
+  @keyframes dockSpin { to { --dock-ang:360deg; } }
+  @keyframes sheen {
+    0%   { opacity:0;   transform:translateX(-30%); }
+    35%  { opacity:.9; }
+    100% { opacity:0;   transform:translateX(30%); }
+  }
+  .dock:focus-within {
+    border-color:color-mix(in srgb, var(--coral) 70%, transparent);
+    box-shadow:inset 0 1px 0 var(--glass-hi),
+               inset 0 -1px 0 var(--glass-lo),
+               0 0 0 3px color-mix(in srgb, var(--coral) 15%, transparent),
+               0 16px 38px -22px color-mix(in srgb, var(--coral) 50%, transparent);
+    transform:translateY(-1px);
+  }
+  /* A textarea cannot hold coloured text, so the editor is two stacked layers: a <pre> that
+     renders the highlighted copy, and the real textarea on top with transparent glyphs and a
+     visible caret. Every metric below has to match exactly or the two drift apart as you
+     type, which is why the shared typography lives in one rule. */
+  .editor { position:relative; flex:1; min-width:0; }
+  .editor textarea, .hl-layer {
+    margin:0; padding:8px 0 7px; border:none;
+    font-family:var(--mono); font-size:14px; line-height:1.5; letter-spacing:normal;
+    white-space:pre-wrap; overflow-wrap:break-word; word-break:normal; tab-size:2;
+  }
+  .hl-layer {
+    position:absolute; inset:0; z-index:0; overflow:hidden; pointer-events:none;
+    color:var(--ink); background:none;
+  }
+  .editor textarea {
+    position:relative; z-index:1; display:block; width:100%; resize:none; outline:none;
+    background:none; color:transparent; -webkit-text-fill-color:transparent;
+    caret-color:var(--coral); max-height:40vh; min-height:34px; overflow-y:auto;
+  }
+  /* the placeholder is real text in the textarea, so it needs its fill colour put back */
+  .editor textarea::placeholder { color:var(--ink-dim); -webkit-text-fill-color:var(--ink-dim); opacity:.55; }
+  .editor textarea::selection { background:color-mix(in srgb, var(--coral) 30%, transparent); }
+
+  /* the pair under the caret, lit on both sides at once */
+  .hl-layer .pmatch {
+    background:color-mix(in srgb, var(--coral) 26%, transparent);
+    border-radius:3px; box-shadow:0 0 0 1px color-mix(in srgb, var(--coral) 45%, transparent);
+  }
+
+  /* a round glass pill with an arrow, not a labelled slab */
+  .send {
+    flex:none; width:34px; height:34px; border-radius:50%; cursor:pointer;
+    display:inline-flex; align-items:center; justify-content:center; color:#fff;
+    background:radial-gradient(120% 120% at 30% 15%,
+              color-mix(in srgb, var(--coral) 72%, white) 0%,
+              var(--coral) 48%,
+              color-mix(in srgb, var(--coral) 80%, black) 100%);
+    border:1px solid color-mix(in srgb, var(--coral) 72%, black);
+    box-shadow:inset 0 1px 1px rgba(255,255,255,.42),
+               inset 0 -2px 4px rgba(0,0,0,.16),
+               0 2px 8px -2px color-mix(in srgb, var(--coral) 55%, transparent);
+    transition:transform var(--t-state) var(--e-out), box-shadow var(--t-state) var(--e-out),
+               filter var(--t-micro), opacity var(--t-micro);
+  }
+  .send svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:2.4;
+              stroke-linecap:round; stroke-linejoin:round;
+              transition:transform var(--t-state) var(--e-out); }
+  .send:hover:not(:disabled) {
+    transform:translateY(-2px) scale(1.05); filter:brightness(1.06);
+    box-shadow:inset 0 1px 1px rgba(255,255,255,.5),
+               inset 0 -2px 4px rgba(0,0,0,.16),
+               0 8px 20px -4px color-mix(in srgb, var(--coral) 65%, transparent);
+  }
+  .send:hover:not(:disabled) svg { transform:translateY(-1.5px); }
+  .send:active:not(:disabled) { transform:translateY(0) scale(.94); }
+  .send:disabled { cursor:default; opacity:.45; filter:saturate(.5); box-shadow:none; }
+  /* while an eval is in flight the ring breathes, so the disabled state reads as "working" */
+  .send.busy { opacity:1; filter:none; animation:sendPulse 1.5s var(--e-out) infinite; }
+  @keyframes sendPulse {
+    0%,100% { box-shadow:0 0 0 0 color-mix(in srgb, var(--pending) 55%, transparent); }
+    50%     { box-shadow:0 0 0 6px color-mix(in srgb, var(--pending) 0%, transparent); }
+  }
+  .send.prod { --coral:var(--danger); }
+
+  .hint {
+    margin:9px auto 0; font-family:var(--ui); font-size:10.5px;
+    color:var(--ink-dim); display:flex; gap:14px; flex-wrap:wrap; align-items:center;
+  }
+  .hint > span:not(.pp) { opacity:.75; }
+  .hint .pp {
+    cursor:pointer; user-select:none; padding:1px 6px; border-radius:5px;
+    background:color-mix(in srgb, var(--ink-dim) 10%, transparent);
+    transition:color var(--t-micro), background var(--t-micro), transform var(--t-micro) var(--e-out);
+  }
+  .hint .pp:hover { transform:translateY(-1px); color:var(--ink); background:color-mix(in srgb, var(--ink-dim) 18%, transparent); }
+  .hint .pp.on { color:var(--card); background:var(--coral); font-weight:600; }
+  .hint .synerr {
+    color:var(--danger); background:var(--danger-wash); opacity:1;
+    padding:1px 6px; border-radius:5px; font-weight:600;
+  }
+  .banner {
+    margin:0 auto 14px; font-family:var(--ui); font-size:12px;
+    color:var(--danger); background:var(--danger-wash); border:1px solid var(--danger);
+    border-radius:6px; padding:7px 12px;
+    display:none;
+  }
+  .banner.show {
+    display:block;
+    animation: bannerIn var(--t-enter) var(--e-out) both;
+  }
+  @keyframes bannerIn { from { opacity:0; transform:translateY(-10px); } to { opacity:1; transform:translateY(0); } }
+
+  /* ── completion popup ───────────────────────────────────────────── */
+  .cmp {
+    position:fixed; z-index:40; display:none; background:var(--card);
+    border:1px solid var(--line); border-radius:7px; overflow:hidden;
+    box-shadow:0 8px 26px rgba(0,0,0,.13); width:430px;
+  }
+  .cmp.show {
+    display:block;
+    animation: cmpIn var(--t-enter) var(--e-out) both;
+  }
+  @keyframes cmpIn { from { opacity:0; transform:translateY(-8px) scale(0.98); } to { opacity:1; transform:translateY(0) scale(1); } }
+  .cmp-list { max-height:212px; overflow-y:auto; }
+  .cmp-row { 
+    display:flex; align-items:baseline; gap:9px; padding:5px 11px; cursor:pointer;
+    transition:background var(--t-micro), transform var(--t-micro) var(--e-out);
+  }
+  .cmp-row:hover { background:color-mix(in srgb, var(--coral-wash) 50%, transparent); transform:translateX(2px); }
+  .cmp-row[aria-selected="true"] { background:var(--coral-wash); }
+  .cmp-row .c { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .cmp-row .c em { font-style:normal; color:var(--coral); font-weight:700; }
+  .cmp-row .t { font-family:var(--ui); font-size:10px; color:var(--ink-dim); white-space:nowrap; }
+  .cmp-row .o { font-family:var(--ui); font-size:10px; color:var(--ink-dim); white-space:nowrap; max-width:130px; overflow:hidden; text-overflow:ellipsis; }
+  .cmp-doc {
+    border-top:1px solid var(--line); padding:8px 11px; background:var(--sunk);
+    max-height:112px; overflow-y:auto; display:none;
+  }
+  .cmp-doc.show { display:block; }
+  .cmp-doc .sig { color:var(--coral); font-size:12px; white-space:pre-wrap; }
+  .cmp-doc .doc { font-family:var(--ui); font-size:11.5px; color:var(--ink-dim); margin-top:5px; white-space:pre-wrap; line-height:1.55; }
+
+  /* ── snippet rows + theme chips (left pane) ──────────────────────── */
+  .chip {
+    font-family:var(--ui); font-size:10.5px; color:var(--ink-dim);
+    background:var(--paper); border:1px solid color-mix(in srgb, var(--ink-dim) 32%, transparent);
+    border-radius:20px; padding:2px 9px; cursor:pointer;
+    transition:transform var(--t-micro) var(--e-out),
+               box-shadow var(--t-micro) var(--e-out),
+               color var(--t-micro), background var(--t-micro), border-color var(--t-micro);
+  }
+  .chip:hover {
+    color:var(--ink);
+    transform:translateY(-1px) scale(1.02);
+    box-shadow:0 2px 6px color-mix(in srgb, var(--coral) 18%, transparent);
+  }
+  .chip:active { transform:translateY(1px) scale(0.98); }
+  .chip.on { color:var(--card); background:var(--coral); border-color:var(--coral); }
+  .qa-row {
+    padding:8px 14px; cursor:pointer; border-bottom:1px solid var(--line);
+    transition:background var(--t-micro), transform var(--t-micro) var(--e-out);
+  }
+  .qa-row:hover { background:color-mix(in srgb, var(--coral-wash) 55%, transparent); transform:translateX(3px); }
+  .qa-row[aria-selected="true"] { background:var(--coral-wash); }
+  .qa-row .ti { font-family:var(--ui); font-size:12px; color:var(--ink); line-height:1.45; }
+  .qa-row .th { font-family:var(--ui); font-size:9.5px; color:var(--ink-dim); margin-top:2px; }
+  .qa-row.lint-bad { outline:1.5px solid var(--danger); outline-offset:-1.5px; background:var(--danger-wash); }
+  .qa-row.lint-bad .ti::before { content:'⚠ '; color:var(--danger); }
+
+  /* ── polish : scrollbars, selection, sticky heads, focus rings ──── */
+  ::selection { background:var(--coral-wash); color:var(--ink); }
+  * { scrollbar-width:thin; scrollbar-color:color-mix(in srgb, var(--ink-dim) 30%, transparent) transparent; }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb {
+    background:color-mix(in srgb, var(--ink-dim) 30%, transparent);
+    border-radius:6px; border:2px solid transparent; background-clip:content-box;
+    transition:background var(--t-state);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background:color-mix(in srgb, var(--ink-dim) 55%, transparent); background-clip:content-box;
+  }
+
+  /* pane titles stay put while their list scrolls under them */
+  .qa h2, aside h2 {
+    position:sticky; top:0; z-index:2;
+    background:color-mix(in srgb, var(--sunk) 92%, transparent); backdrop-filter:blur(4px);
+  }
+
+  :focus-visible { outline:2px solid color-mix(in srgb, var(--coral) 55%, transparent); outline-offset:2px; border-radius:4px; }
+  button:focus-visible, .chip:focus-visible { outline-offset:1px; }
+  textarea:focus-visible { outline:none; }
+
+  /* the snippets toggle carries the left pane's coral, not the inspector's violet */
+  #snipbtn.on { color:var(--coral); border-color:var(--coral); background:var(--coral-wash); }
+
+  /* side panes crossfade their contents in as they slide open */
+  .qa:not(.collapsed) > *, aside.open > * { animation:paneFade var(--t-panel) var(--e-out) both; }
+  @keyframes paneFade { from { opacity:0; } to { opacity:1; } }
+
+  @media (max-width:1100px) {
+    aside.open { position:fixed; right:0; top:0; bottom:0; z-index:30; box-shadow:-8px 0 26px rgba(0,0,0,.16); }
+    .qa:not(.collapsed) { position:fixed; left:0; top:0; bottom:0; z-index:30; box-shadow:8px 0 26px rgba(0,0,0,.16); }
+  }
+  @media (prefers-reduced-motion:reduce) { * { animation:none !important; } }
+</style>
+</head>
+<body>
+<header id="bar">
+  <div class="field"><span class="k">namespace</span><span class="v" id="ns">connecting…</span></div>
+  <div class="field"><span class="k">nrepl</span><span class="v">__NREPL__</span></div>
+  <div class="field"><span class="k">host</span><span class="v" id="host">—</span></div>
+  <span class="prod-chip">▲ production</span>
+  <span class="spacer"></span>
+  <button class="toggle" id="snipbtn">snippets ⌘K</button>
+  <button class="toggle" id="taptoggle">tap&gt; <span class="count" id="tapcount">0</span></button>
+  <span class="status" id="status"><span class="dot"></span><span id="statustxt">connecting</span></span>
+</header>
+
+<div class="panes">
+  <nav class="qa" id="qa">
+    <h2>quick access <span class="hint2" id="qacollapse" title="Collapse (⌘K)">hide</span></h2>
+    <div class="qa-search">
+      <input id="palq" placeholder="filter snippets…" spellcheck="false" autocomplete="off">
+      <span class="qclr" id="filterclear" hidden title="Clear filter">× clear</span>
+      <span class="n" id="paln"></span>
+    </div>
+    <div class="qa-themes">
+      <div class="qa-themes-lbl">themes<span class="tclr" id="themeclear" hidden>× clear</span></div>
+      <div class="chips" id="palchips"></div>
+    </div>
+    <div class="qa-list" id="pallist"></div>
+    <div class="qa-foot"><span>↑↓ browse</span><span>⏎ insert</span><span class="warn">insert only — you press Send</span></div>
+  </nav>
+
+  <div class="center">
+  <main>
+    <div class="wrap">
+      <div class="hist-head">
+        <span class="ttl">history</span>
+        <button class="hist-clear" id="histclear" title="Clear the transcript (keeps ↑↓ recall history)">clear history</button>
+        <button class="hist-clear" id="wipestorage" title="Wipe everything replweb keeps in this browser (transcript, taps, recall history, pane state) and reload">reset storage</button>
+      </div>
+      <div class="banner" id="banner">Lost the REPL connection. Retrying…</div>
+      <div id="transcript"></div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="arglist" id="arglist"></div>
+    <div class="dock">
+      <div class="editor">
+        <pre class="hl-layer" id="hl" aria-hidden="true"></pre>
+        <textarea id="in" rows="1" placeholder="(type a form…)" spellcheck="false" autocomplete="off" autofocus></textarea>
+      </div>
+      <button class="send" id="send" title="Send  ⏎" aria-label="Send">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V5M12 5l-6.5 6.5M12 5l6.5 6.5"/></svg>
+      </button>
+    </div>
+    <div class="hint">
+      <span>⏎ send</span><span>⇧⏎ newline</span><span>⇥ complete</span>
+      <span>↑↓ history</span><span>esc stop</span>
+      <span class="synerr" id="synerr" hidden>⚠ won't read cleanly</span>
+      <span class="pp" id="pp" title="Pretty-print results server-side (clojure.pprint)">pprint on</span>
+      <span class="pp" id="tap1" title="Send (tap> *1) — opens the last result in the inspector">(tap&gt; *1)</span>
+    </div>
+  </footer>
+  </div>
+
+  <aside id="taprail">
+    <h2>inspector <span class="hint2" id="tapclear">clear</span><span class="hint2" id="tapcollapse" title="Hide">hide</span></h2>
+    <div class="taps" id="taps">
+      <div class="tap-empty" id="tapempty">
+        <code>tap&gt;</code> anything to inspect it here — from any thread, including a
+        background job or a request in flight.<br><br>
+        <code>(tap&gt; *1)</code> sends the last result. Hovering a result in the transcript
+        gives you the same thing as a button.<br><br>
+        The value stays in the JVM; expanding a node fetches just that level, so
+        <code>(tap&gt; (range))</code> or a whole entity graph is safe.
+      </div>
+    </div>
+  </aside>
+</div>
+
+<div class="cmp" id="cmp">
+  <div class="cmp-list" id="cmplist"></div>
+  <div class="cmp-doc" id="cmpdoc"></div>
+</div>
+
+<script>
+const C = crypto.randomUUID();
+const $ = s => document.querySelector(s);
+const transcript = $('#transcript'), input = $('#in'), sendBtn = $('#send');
+const bar = $('#bar'), banner = $('#banner'), cmp = $('#cmp'), cmpList = $('#cmplist'), cmpDoc = $('#cmpdoc');
+const dock = $('.dock');
+let running = null;
+const PPRINT_KEY = 'replweb-pprint';
+// on by default: nearly every value worth reading here is a map or a tree. The choice is
+// remembered, so turning it off stays off across reloads.
+let pprint = localStorage.getItem(PPRINT_KEY) !== '0';
+const HISTORY_KEY = 'replweb-history';
+const MAX_HISTORY = 100;
+const MAX_BLOCKS = 200;      /* transcript rows kept, live and stored */
+const MAX_FIELD  = 20000;    /* per-field cap: one huge pprinted map must not eat the quota */
+
+/* ── persistence ─────────────────────────────────────────────── */
+/* Keys are kept apart on purpose: a tap storm would otherwise rewrite all 200 transcript
+   rows on every tapped value. */
+const K_UI = 'replweb-ui', K_TRANSCRIPT = 'replweb-transcript', K_TAPS = 'replweb-taps';
+
+function load(key, fallback) {
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
+  catch { return fallback; }
+}
+/* localStorage has no reliable size to check against, so treat the quota as an exception to
+   recover from: drop the oldest half of whatever list `trim` points at, and try again. */
+function save(key, obj, trim) {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try { localStorage.setItem(key, JSON.stringify(obj)); return true; }
+    catch {
+      const list = trim && trim(obj);
+      if (!list || list.length < 2) { try { localStorage.removeItem(key); } catch {} return false; }
+      list.splice(0, Math.ceil(list.length / 2));
+    }
+  }
+  return false;
+}
+const clip = s => typeof s === 'string' && s.length > MAX_FIELD ? s.slice(0, MAX_FIELD) + '…' : s;
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+let ui = load(K_UI, {});
+function saveUI() { save(K_UI, ui); }
+
+/* Which bridge process we are talking to, learned from `ready`. Stored alongside the
+   transcript and the taps so a later visit can tell whether their ids still refer to
+   anything. */
+let currentBoot = null;
+let history = load(HISTORY_KEY, []);
+if (!Array.isArray(history)) history = [];
+let histIx = history.length;
+
+/* Clojure symbol charset — used to slice the token under the caret. */
+const SYM = /[\w*+!\-_'?<>=&%.:\/]/;
+
+/* ── tiny Clojure/EDN highlighter, with rainbow nesting ───────── */
+function hl(src, marks) {
+  let out = '', i = 0, depth = 0;
+  const mk = i => (marks && marks.has(i)) ? ' pmatch' : '';
+  while (i < src.length) {
+    const c = src[i];
+    if (c === ';') { let j = src.indexOf('\n', i); if (j < 0) j = src.length;
+      out += `<span class="t-cmt">${esc(src.slice(i, j))}</span>`; i = j; continue; }
+    if (c === '"') { let j = i + 1; while (j < src.length && (src[j] !== '"' || src[j-1] === '\\')) j++;
+      out += `<span class="t-str">${esc(src.slice(i, j + 1))}</span>`; i = j + 1; continue; }
+    if (c === '\\') { out += esc(src.slice(i, i + 2)); i += 2; continue; }   // char literal
+    if (c === ':') { let j = i + 1; while (j < src.length && /[\w.\/*+!?<>=-]/.test(src[j])) j++;
+      out += `<span class="t-kw">${esc(src.slice(i, j))}</span>`; i = j; continue; }
+    if ('(['.includes(c) || c === '{') {
+      out += `<span class="p${depth % 6}${mk(i)}">${c}</span>`; depth++; i++; continue;
+    }
+    if (')]'.includes(c) || c === '}') {
+      // a closer with nothing open is a real mistake - show it rather than miscolour the rest
+      depth--;
+      out += depth < 0 ? `<span class="unbal">${c}</span>`
+                       : `<span class="p${depth % 6}${mk(i)}">${c}</span>`;
+      if (depth < 0) depth = 0;
+      i++; continue;
+    }
+    if (/[0-9]/.test(c) && !/\w/.test(src[i-1] || ' ')) { let j = i; while (j < src.length && /[\d.eExA-Fa-f_/N-]/.test(src[j])) j++;
+      out += `<span class="t-num">${esc(src.slice(i, j))}</span>`; i = j; continue; }
+    out += esc(c); i++;
+  }
+  return out;
+}
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+/* ── live highlighting of the editor ─────────────────────────── */
+/* Index of every bracket to the index of its partner. Strings, char literals and line
+   comments are skipped, exactly as hl() skips them, so a ")" inside "…" pairs nothing. */
+function bracketMap(src) {
+  const stack = [], map = new Map();
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === ';')  { const j = src.indexOf('\n', i); i = j < 0 ? src.length : j; continue; }
+    if (c === '"')  { let j = i + 1; while (j < src.length && (src[j] !== '"' || src[j-1] === '\\')) j++; i = j + 1; continue; }
+    if (c === '\\') { i += 2; continue; }
+    if (c === '(' || c === '[' || c === '{') { stack.push(i); i++; continue; }
+    if (c === ')' || c === ']' || c === '}') {
+      const o = stack.pop();
+      if (o !== undefined) { map.set(o, i); map.set(i, o); }
+      i++; continue;
+    }
+    i++;
+  }
+  return map;
+}
+
+/* bracketMap only depends on the text, not the caret - cache it against the last source seen
+   so a caret move alone (selectionchange, no input) does not re-scan the whole buffer. */
+let bmCacheSrc = null, bmCache = null;
+function cachedBracketMap(src) {
+  if (src !== bmCacheSrc) { bmCacheSrc = src; bmCache = bracketMap(src); }
+  return bmCache;
+}
+
+/* The bracket the caret is "on": the one just behind it first, since that is where you land
+   after typing a closer, then the one just ahead. */
+function matchMarks(v, caret) {
+  const map = cachedBracketMap(v);
+  for (const idx of [caret - 1, caret]) {
+    if (idx >= 0 && idx < v.length && '()[]{}'.includes(v[idx]) && map.has(idx))
+      return new Set([idx, map.get(idx)]);
+  }
+  return null;
+}
+
+const hlLayer = $('#hl');
+function paint() {
+  const v = input.value;
+  const marks = document.activeElement === input ? matchMarks(v, input.selectionStart) : null;
+  // trailing newline: a <pre> collapses a final empty line, the textarea does not
+  hlLayer.innerHTML = hl(v, marks) + '\n';
+  hlLayer.scrollTop = input.scrollTop;
+  hlLayer.scrollLeft = input.scrollLeft;
+}
+
+/* ── transcript blocks ───────────────────────────────────────── */
+function newBlock(code) {
+  const block = document.createElement('div'); block.className = 'block';
+  const form = document.createElement('div'); form.className = 'form running';
+  form.innerHTML = `<span class="caret">&rsaquo;</span>${hl(code)}`;
+  form.title = 'Click to put this form back in the editor';
+  form.addEventListener('click', () => { input.value = code; autogrow(); input.focus(); });
+  block.appendChild(form);
+  transcript.appendChild(block);
+  // the record shadows the DOM so the row can be rebuilt after a reload
+  running = { block, form, outEl:null, errEl:null, hadResult:false, errored:false,
+              rec: { code, out:'', err:'', results:[], rid:null } };
+  trimTranscript();
+  scroll();
+}
+/* Same bound as the inspector rail keeps on tap items. */
+function trimTranscript() {
+  while (transcript.children.length > MAX_BLOCKS) transcript.firstChild.remove();
+}
+function streamEl(kind) {
+  const key = kind === 'err' ? 'errEl' : 'outEl';
+  if (!running[key]) {
+    const el = document.createElement('div');
+    el.className = 'stream' + (kind === 'err' ? ' err' : '');
+    running.block.appendChild(el); running[key] = el;
+  }
+  return running[key];
+}
+function addResult(html, cls, ms) {
+  running.rec.results.push({ html, cls: cls || '', ms: ms != null ? ms : null });
+  running.block.appendChild(resultEl(html, cls, ms));
+  running.hadResult = true; scroll();
+}
+/* The one place a result row is built, so restore and live rendering cannot drift.
+   `html` is always produced by hl()/esc() here, which is what makes it safe to re-inject. */
+function resultEl(html, cls, ms) {
+  const r = document.createElement('div'); r.className = 'result ' + (cls || '');
+  r.innerHTML = `<span class="val">${html}</span>` + (ms != null ? `<span class="ms">${ms}</span>` : '');
+  return r;
+}
+
+/* Each row's value is held in the app under its own id, so inspect names that exact value.
+   It used to send (tap> *N) instead, which broke twice over: a row that was itself a tap>
+   has *1 bound to `true`, and the eval the button sent shifted the very *1 *2 *3 it was
+   counting on - hence "works every other click". Nothing is re-evaluated and no transcript
+   row is added; the value goes to the inspector from a separate session. */
+function addInspectButton(block, rid, restored) {
+  const row = block.querySelector('.result');
+  if (!row || row.querySelector('.insp')) return;
+  const btn = document.createElement('button');
+  btn.className = 'insp';
+  btn.textContent = 'inspect';
+  btn.title = 'Open this value in the inspector';
+  if (restored) {
+    // A rid only means anything against the bridge that issued it: result ids restart at 0
+    // with the bridge process while the app-side store outlives it, so trusting a stored rid
+    // across a bridge restart would open a different value. Stay disabled until `ready`
+    // confirms the same boot id.
+    btn.disabled = true;
+    btn.dataset.pending = '1';
+    btn.title = 'Checking whether this value is still held…';
+  }
+  btn.addEventListener('click', async () => {
+    openInspector();
+    btn.disabled = true;
+    const ok = await fetch(`/inspect-result?rid=${rid}`, { method:'POST' })
+      .then(r => r.json()).then(j => j && j.ok).catch(() => false);
+    btn.disabled = false;
+    // the app only keeps the last 100 results; say so rather than fail silently
+    if (!ok) { btn.textContent = 'expired'; btn.disabled = true; btn.title = 'That value is no longer held in the app'; }
+  });
+  // querySelector can return a match nested inside a child (e.g. a restored row whose
+  // result html already embeds a '.ms'), and insertBefore requires a direct child -
+  // fall back to appending rather than throwing and aborting the whole restore.
+  const ms = row.querySelector(':scope > .ms');
+  row.insertBefore(btn, ms);
+}
+const fmtMs = ms => ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(2) + ' s';
+function scroll() { const m = document.querySelector('main'); m.scrollTop = m.scrollHeight; }
+
+/* Clear the transcript only. The ↑↓ recall history (localStorage) is left untouched -
+   it is a different thing and losing it by accident would be annoying. */
+function clearHistory() {
+  transcript.innerHTML = '';
+  running = null;
+  blocks.length = 0; saveTranscript();
+}
+$('#histclear').addEventListener('click', clearHistory);
+
+/* Every key this app writes to localStorage - kept in one place so "reset storage" cannot
+   drift out of sync with what actually gets written. */
+const ALL_STORAGE_KEYS = [HISTORY_KEY, K_UI, K_TRANSCRIPT, K_TAPS, PPRINT_KEY];
+function wipeStorage() {
+  if (!confirm('Wipe everything replweb has stored in this browser (transcript, taps, recall history, pane state) and reload?')) return;
+  ALL_STORAGE_KEYS.forEach(k => { try { localStorage.removeItem(k); } catch {} });
+  location.reload();
+}
+$('#wipestorage').addEventListener('click', wipeStorage);
+
+/* ── transcript persistence ──────────────────────────────────── */
+/* `blocks` is the stored mirror of the transcript: one record per completed row, oldest
+   first, bounded the same way the DOM is. */
+const storedTranscript = load(K_TRANSCRIPT, {});
+let blocks = Array.isArray(storedTranscript.blocks) ? storedTranscript.blocks : [];
+const storedBoot = storedTranscript.boot || null;
+
+function saveTranscript() {
+  if (blocks.length > MAX_BLOCKS) blocks.splice(0, blocks.length - MAX_BLOCKS);
+  const payload = {
+    boot: currentBoot,
+    blocks: blocks.map(b => ({
+      code: clip(b.code), out: clip(b.out), err: clip(b.err), rid: b.rid,
+      results: b.results.map(r => ({ html: clip(r.html), cls: r.cls, ms: r.ms })),
+    })),
+  };
+  save(K_TRANSCRIPT, payload, o => o.blocks);
+}
+
+/* Rebuilds one stored row. Kept separate from newBlock, which grows a row incrementally as
+   SSE arrives and shares almost nothing with this. */
+function restoreBlock(rec) {
+  const block = document.createElement('div'); block.className = 'block restored';
+  const form = document.createElement('div'); form.className = 'form';
+  form.innerHTML = `<span class="caret">&rsaquo;</span>${hl(rec.code)}`;
+  form.title = 'Click to put this form back in the editor';
+  form.addEventListener('click', () => { input.value = rec.code; autogrow(); input.focus(); });
+  block.appendChild(form);
+  if (rec.out) { const e = document.createElement('div'); e.className = 'stream'; e.textContent = rec.out; block.appendChild(e); }
+  if (rec.err) { const e = document.createElement('div'); e.className = 'stream err'; e.textContent = rec.err; block.appendChild(e); }
+  (Array.isArray(rec.results) ? rec.results : [])
+    .forEach(r => block.appendChild(resultEl(r && r.html, r && r.cls, r && r.ms)));
+  if (rec.rid != null) addInspectButton(block, rec.rid, true);
+  transcript.appendChild(block);
+}
+
+function restoreTranscript() {
+  blocks.forEach(rec => {
+    try { restoreBlock(rec); } catch (e) { console.error('restoreBlock failed:', e); }
+  });
+  trimTranscript();
+  // jump, do not glide: 200 rows arriving at once should not animate a scroll
+  const m = document.querySelector('main');
+  m.style.scrollBehavior = 'auto'; m.scrollTop = m.scrollHeight; m.style.scrollBehavior = '';
+}
+
+/* ── inspector rail ──────────────────────────────────────────── */
+/* Values live in the app JVM. A node holds its tap index + the path of child indices that
+   reaches it, and asks /inspect for one level at a time when expanded. */
+const rail = $('#taprail'), tapsEl = $('#taps'); let tapCount = 0;
+
+function nodeRow(d, tapIdx, path) {
+  const row = document.createElement('div');
+  row.className = 'node' + (d.branch ? ' branch' : '');
+  row.innerHTML = `<span class="tw"></span>`
+    + (d.label != null ? `<span class="lbl">${esc(d.label)}</span>` : '')
+    + `<span class="prev">${hl(d.preview)}</span><span class="kind">${esc(d.kind)}</span>`;
+  const wrap = document.createElement('div');
+  wrap.appendChild(row);
+  if (!d.branch) return wrap;
+
+  const kids = document.createElement('div');
+  kids.className = 'kids'; kids.style.display = 'none';
+  wrap.appendChild(kids);
+  let loaded = false;
+  row.addEventListener('click', async e => {
+    e.stopPropagation();
+    const open = row.classList.toggle('open');
+    kids.style.display = open ? '' : 'none';
+    if (!open || loaded) return;
+    loaded = true;
+    kids.innerHTML = '<div class="more">loading…</div>';
+    const node = await fetch(`/inspect?i=${tapIdx}&path=${path.join('.')}`)
+      .then(r => r.json()).catch(() => null);
+    kids.innerHTML = '';
+    if (!node) { kids.innerHTML = '<div class="more">could not read that value</div>'; return; }
+    if (node.class) {
+      const c = document.createElement('div'); c.className = 'cls'; c.textContent = node.class;
+      kids.appendChild(c);
+    }
+    (node.children || []).forEach(ch => kids.appendChild(nodeRow(ch, tapIdx, [...path, ch.i])));
+    if (node.n >= 200) {
+      const m = document.createElement('div'); m.className = 'more';
+      m.textContent = 'first 200 shown'; kids.appendChild(m);
+    }
+  });
+  return wrap;
+}
+
+/* The rail opens itself on a tap, since tapping is how you ask to look at something.
+   Closing it by hand is taken as "leave me alone" until you open it again - otherwise a
+   background job tapping in a loop would keep prying the panel open. Off by default: a
+   first-time visitor should see a clean centre pane, not have it pried open by whatever
+   happens to get tapped first. */
+let autoOpenRail = ui.autoOpenRail === true;
+
+/* Stored mirror of the rail. Only the shallow description travels - the value itself stays
+   in the app JVM, so a restored node can be read but only re-expanded while that JVM, and the
+   bridge that indexes it, are still the ones we saw it on. */
+const storedTaps = load(K_TAPS, {});
+let taps = Array.isArray(storedTaps.items) ? storedTaps.items : [];
+// debounced: a job tapping in a loop must not serialise the whole list per value
+const saveTaps = debounce(() => {
+  if (taps.length > 200) taps.splice(0, taps.length - 200);
+  save(K_TAPS, { boot: currentBoot, items: taps }, o => o.items);
+}, 400);
+
+function tapItemEl(d, restored) {
+  const item = document.createElement('div');
+  item.className = 'tap-item' + (restored ? ' restored' : '');
+  const when = document.createElement('div'); when.className = 'when';
+  when.textContent = new Date(d.at).toLocaleTimeString();
+  item.appendChild(when);
+  item.appendChild(nodeRow(d, d.i, []));
+  return item;
+}
+
+function restoreTaps() {
+  if (!taps.length) return;
+  $('#tapempty')?.remove();
+  taps.forEach(d => tapsEl.appendChild(tapItemEl(d, true)));
+  tapCount = taps.length;
+  $('#tapcount').textContent = tapCount;
+  tapsEl.scrollTop = tapsEl.scrollHeight;
+}
+
+function addTap(d) {
+  $('#tapempty')?.remove();
+  const item = tapItemEl(d, false);
+  tapsEl.appendChild(item);
+  while (tapsEl.children.length > 200) tapsEl.firstChild.remove();
+  $('#tapcount').textContent = ++tapCount;
+  taps.push({ label:d.label, kind:d.kind, preview:clip(d.preview), branch:d.branch, i:d.i, at:d.at });
+  saveTaps();
+
+  if (autoOpenRail) setRail(true);
+  if (!rail.classList.contains('open')) $('#taptoggle').classList.add('on');
+  // one level open on arrival: the point of tapping is to see inside
+  item.querySelector('.node.branch')?.click();
+  tapsEl.scrollTop = tapsEl.scrollHeight;
+}
+
+function setRail(open) {
+  rail.classList.toggle('open', open);
+  $('#taptoggle').classList.toggle('on', open);
+  ui.rail = open; saveUI();
+}
+/* Hiding by hand means "leave me alone" - the same opt-out the header toggle applies, so a
+   background job tapping in a loop cannot pry the pane back open. */
+function hideRail() { autoOpenRail = false; ui.autoOpenRail = false; setRail(false); }
+/* An explicit "inspect this" action (the transcript button, the (tap> *1) hint): force the
+   rail open now, and re-arm auto-open in case it had been dismissed by hand earlier. */
+function openInspector() { autoOpenRail = true; ui.autoOpenRail = true; setRail(true); }
+$('#taptoggle').addEventListener('click', () => {
+  const open = !rail.classList.contains('open');
+  autoOpenRail = open;          // closing it by hand opts out of auto-open
+  ui.autoOpenRail = open;
+  setRail(open);
+});
+$('#tapcollapse').addEventListener('click', hideRail);
+$('#tapclear').addEventListener('click', () => {
+  tapsEl.innerHTML = ''; tapCount = 0; $('#tapcount').textContent = '0';
+  taps.length = 0; saveTaps();
+});
+
+/* ── SSE ─────────────────────────────────────────────────────── */
+function connect() {
+  const es = new EventSource('/stream?c=' + C);
+  es.addEventListener('ready', e => {
+    let d;
+    try { d = JSON.parse(e.data); } catch (err) { console.error('bad `ready` payload:', err); return; }
+    $('#ns').textContent = d.ns || '?';
+    setStatus(true);
+    if (d.boot) {
+      const prev = currentBoot;
+      currentBoot = d.boot;
+      if (prev === null) settleRestored(d.boot === storedBoot);   // first hello: reconcile what we restored
+      else if (prev !== d.boot) expireInspect(document);          // the bridge restarted under us
+    }
+    if (d.identity) {
+      const host = (d.identity.match(/"([^"]+)"/) || [, '—'])[1];
+      const el = $('#host'); el.textContent = host;
+      el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+      // the button is an icon now, so production shows as colour + title, not a longer label
+      if (/prod/i.test(d.identity)) {
+        bar.classList.add('prod');
+        sendBtn.classList.add('prod');
+        sendBtn.title = 'Send to PRODUCTION  ⏎';
+      }
+    }
+  });
+  es.addEventListener('msg', e => {
+    try { onMsg(JSON.parse(e.data)); } catch (err) { console.error('bad `msg` payload:', err); }
+  });
+  es.addEventListener('tap', e => {
+    try { addTap(JSON.parse(e.data)); } catch (err) { console.error('bad `tap` payload:', err); }
+  });
+  es.onerror = () => setStatus(false);
+  es.onopen = () => banner.classList.remove('show');
+}
+/* Decides, once the bridge has identified itself, whether what we restored is still backed
+   by live values. Same boot id: everything reconnects. Different: the ids are meaningless
+   now, so say so rather than resolve them to whatever happens to sit at that index. */
+function expireInspect(root) {
+  root.querySelectorAll('.insp').forEach(btn => {
+    delete btn.dataset.pending;
+    btn.disabled = true; btn.textContent = 'expired';
+    btn.title = 'From an earlier session — that value is no longer held';
+  });
+}
+function settleRestored(sameBoot) {
+  if (!sameBoot) expireInspect(document);
+  document.querySelectorAll('.insp[data-pending]').forEach(btn => {
+    delete btn.dataset.pending;
+    btn.disabled = false; btn.title = 'Open this value in the inspector';
+  });
+  if (!sameBoot) {
+    document.querySelectorAll('.tap-item.restored').forEach(el => {
+      el.classList.add('stale');
+      el.title = 'From an earlier session — expanding this can no longer reach the value';
+    });
+  }
+  // once the transcript is stamped with this boot id, later saves carry it forward
+  if (!sameBoot && blocks.length) saveTranscript();
+}
+
+function setStatus(up) {
+  $('#status').classList.toggle('down', !up);
+  $('#statustxt').textContent = up ? 'live' : 'reconnecting…';
+  banner.classList.toggle('show', !up);
+}
+function onMsg(m) {
+  if (!running) return;
+  if (m.t === 'out') { streamEl('out').textContent += m.v; running.rec.out += m.v; }
+  else if (m.t === 'err') { streamEl('err').textContent += m.v; running.rec.err += m.v; running.errored = true; }
+  else if (m.t === 'value') addResult(hl(m.v), '');
+  else if (m.t === 'ex') running.errored = true;   // the err stream already carries the readable message
+  else if (m.t === 'done') {
+    // Send must never stay stuck disabled just because rendering this row hit a snag -
+    // running=null/setBusy(false) always run, whatever happens while building the row.
+    try {
+      running.form.classList.remove('running');
+      const last = running.block.querySelector('.result:last-child'), ms = fmtMs(m.ms);
+      if (m.interrupted && !running.hadResult) addResult('stopped', 'stopped', ms);
+      else if (running.hadResult && last && !last.querySelector('.ms')) {
+        const t = document.createElement('span'); t.className = 'ms'; t.textContent = ms; last.appendChild(t);
+        // the timing is stamped onto the row already drawn, so mirror it into the record too
+        const lastRec = running.rec.results[running.rec.results.length - 1];
+        if (lastRec) lastRec.ms = ms;
+      } else if (!running.hadResult) {
+        addResult(running.errored ? '<span class="t-par">—</span>' : '<span class="t-par">nil</span>',
+                  running.errored ? 'ex' : '', ms);
+      }
+      if (m.ns) $('#ns').textContent = m.ns;
+      if (m.rid != null) { running.rec.rid = m.rid; addInspectButton(running.block, m.rid); }
+      blocks.push(running.rec); saveTranscript();
+      scroll();
+    } catch (err) { console.error('rendering `done` row failed:', err); }
+    finally { running = null; setBusy(false); }
+  }
+}
+
+function setPprint(on) {
+  pprint = on;
+  localStorage.setItem(PPRINT_KEY, on ? '1' : '0');
+  $('#pp').classList.toggle('on', on);
+  $('#pp').textContent = 'pprint ' + (on ? 'on' : 'off');
+}
+
+/* ── send / stop ─────────────────────────────────────────────── */
+/* Disabled alone reads as "broken"; .busy keeps the button lit and breathing so the wait
+   looks like work in progress. */
+function setBusy(on) {
+  sendBtn.disabled = on;
+  sendBtn.classList.toggle('busy', on);
+  dock.classList.toggle('running', on);
+}
+async function send() {
+  const code = input.value.trim();
+  if (!code || running) return;
+  hideCmp();
+  history.push(code); histIx = history.length;
+  if (history.length > MAX_HISTORY) history.shift();
+  // a full quota here must not stop the eval itself from being sent
+  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(history)); }
+  catch (err) { console.error('could not persist history:', err); }
+  input.value = ''; autogrow(); setBusy(true); $('#arglist').innerHTML = '';
+  newBlock(code);
+  try { await fetch(`/eval?c=${C}${pprint ? '&pprint=1' : ''}`, { method:'POST', body:code }); }
+  catch { streamEl('err').textContent += '\n(could not reach the bridge)'; running = null; setBusy(false); }
+}
+function stop() { if (running) fetch('/stop?c=' + C, { method:'POST' }); }
+sendBtn.addEventListener('click', send);
+$('#pp').addEventListener('click', () => {
+  setPprint(!pprint);
+});
+$('#tap1').addEventListener('click', () => { openInspector(); input.value = '(tap> *1)'; autogrow(); send(); });
+
+/* ── completion (nREPL `completions` op) ─────────────────────── */
+let cands = [], sel = 0, cmpStart = 0, docSeq = 0;
+
+function tokenBeforeCaret() {
+  const v = input.value; let i = input.selectionStart;
+  const end = i;
+  while (i > 0 && SYM.test(v[i - 1])) i--;
+  return { start:i, text:v.slice(i, end) };
+}
+
+/* The symbol immediately before `pos`, skipping the whitespace/open-paren a threaded call
+   leaves between it and a following .method - e.g. the `s` in `(-> s .get█`. Only a plain
+   symbol works: there's no static type info here, so a receiver has to already be a bound
+   value (typically a (def ...)'d service) for /members to reflect on its class. */
+function receiverBefore(pos) {
+  const v = input.value;
+  let i = pos;
+  while (i > 0 && /[\s(]/.test(v[i - 1])) i--;
+  const end = i;
+  while (i > 0 && SYM.test(v[i - 1])) i--;
+  return end > i ? v.slice(i, end) : null;
+}
+
+async function requestCompletions() {
+  const { start, text } = tokenBeforeCaret();
+  if (text.length < 2) return hideCmp();
+  cmpStart = start;
+  let list = [];
+  try {
+    if (text[0] === '.') {
+      const receiver = receiverBefore(start);
+      const members = receiver
+        ? await (await fetch(`/members?c=${C}&sym=${encodeURIComponent(receiver)}&prefix=${encodeURIComponent(text.slice(1))}`)).json()
+        : [];
+      list = members.map(m => ({ candidate: '.' + m, type: 'method' }));
+    } else {
+      list = await (await fetch(`/complete?c=${C}&prefix=${encodeURIComponent(text)}`)).json();
+    }
+  } catch { return hideCmp(); }
+  if (!list.length) return hideCmp();
+  cands = list.slice(0, 60); sel = 0;
+  renderCmp(text);
+  showCmpAtCaret();
+  loadDoc();
+}
+
+function renderCmp(prefix) {
+  cmpList.innerHTML = cands.map((c, i) => {
+    const name = c.candidate || '';
+    const marked = name.toLowerCase().startsWith(prefix.toLowerCase())
+      ? `<em>${esc(name.slice(0, prefix.length))}</em>${esc(name.slice(prefix.length))}`
+      : esc(name);
+    const ns = c.ns && !name.includes('/') ? esc(c.ns) : '';
+    return `<div class="cmp-row" role="option" aria-selected="${i === sel}" data-i="${i}">
+              <span class="c">${marked}</span>
+              <span class="o">${ns}</span><span class="t">${esc(c.type || '')}</span>
+            </div>`;
+  }).join('');
+  cmpList.querySelectorAll('.cmp-row').forEach(row => {
+    row.addEventListener('mousedown', e => { e.preventDefault(); sel = +row.dataset.i; accept(); });
+    row.addEventListener('mouseenter', () => { sel = +row.dataset.i; paintSel(); loadDoc(); });
+  });
+}
+function paintSel() {
+  cmpList.querySelectorAll('.cmp-row').forEach((r, i) => {
+    r.setAttribute('aria-selected', i === sel);
+    if (i === sel) r.scrollIntoView({ block:'nearest' });
+  });
+}
+function showCmpAtCaret() {
+  const { x, y, lh } = caretXY();
+  cmp.classList.add('show');
+  const w = cmp.offsetWidth, h = cmp.offsetHeight;
+  cmp.style.left = Math.max(8, Math.min(x, window.innerWidth - w - 8)) + 'px';
+  // Prefer above the caret: the dock sits at the bottom of the viewport.
+  cmp.style.top = (y - h - 6 > 8 ? y - h - 6 : y + lh + 6) + 'px';
+}
+function hideCmp() { cmp.classList.remove('show'); cmpDoc.classList.remove('show'); cands = []; }
+
+async function loadDoc() {
+  const c = cands[sel]; if (!c) return;
+  // nREPL's `lookup` op knows Clojure vars, not Java methods - skip the wasted round trip.
+  if (c.type === 'method') return void cmpDoc.classList.remove('show');
+  const seq = ++docSeq;
+  const info = await (await fetch(`/lookup?c=${C}&sym=${encodeURIComponent(c.candidate)}`)).json().catch(() => null);
+  if (seq !== docSeq || !info) { cmpDoc.classList.remove('show'); return; }
+  const sig = info['arglists-str'] || '';
+  const doc = (info.doc || '').split('\n').slice(0, 4).join('\n');
+  if (!sig && !doc) { cmpDoc.classList.remove('show'); showCmpAtCaret(); return; }
+  cmpDoc.innerHTML = (sig ? `<div class="sig">${esc(sig)}</div>` : '') + (doc ? `<div class="doc">${esc(doc)}</div>` : '');
+  cmpDoc.classList.add('show');
+  showCmpAtCaret();   // the doc panel changed the popup's height - re-anchor it above the caret
+}
+
+function accept() {
+  const c = cands[sel]; if (!c) return;
+  const v = input.value;
+  input.value = v.slice(0, cmpStart) + c.candidate + v.slice(input.selectionStart);
+  const pos = cmpStart + c.candidate.length;
+  input.setSelectionRange(pos, pos);
+  hideCmp(); autogrow(); updateArglist();
+}
+
+/* Pixel position of the caret, via a mirror div that copies the textarea's metrics. */
+function caretXY() {
+  const cs = getComputedStyle(input), div = document.createElement('div');
+  for (const p of ['fontFamily','fontSize','fontWeight','lineHeight','letterSpacing',
+                   'paddingTop','paddingLeft','paddingRight','paddingBottom','borderWidth','width'])
+    div.style[p] = cs[p];
+  Object.assign(div.style, { position:'absolute', visibility:'hidden', whiteSpace:'pre-wrap',
+                             wordWrap:'break-word', boxSizing:cs.boxSizing, top:'0', left:'0' });
+  div.textContent = input.value.slice(0, input.selectionStart);
+  const span = document.createElement('span'); span.textContent = '​';
+  div.appendChild(span); document.body.appendChild(div);
+  const r = input.getBoundingClientRect();
+  const xy = { x: r.left + span.offsetLeft, y: r.top + span.offsetTop - input.scrollTop,
+               lh: parseFloat(cs.lineHeight) || 18 };
+  div.remove();
+  return xy;
+}
+
+/* ── arglists strip (nREPL `lookup` op on the enclosing call) ── */
+let argSeq = 0;
+async function updateArglist() {
+  const v = input.value, caret = input.selectionStart;
+  let depth = 0, open = -1;
+  for (let i = caret - 1; i >= 0; i--) {
+    const c = v[i];
+    if (c === ')' || c === ']' || c === '}') depth++;
+    else if (c === '(' || c === '[' || c === '{') { if (depth === 0) { open = i; break; } depth--; }
+  }
+  if (open < 0 || v[open] !== '(') return void ($('#arglist').innerHTML = '');
+  let j = open + 1, k = j;
+  while (k < v.length && SYM.test(v[k])) k++;
+  const sym = v.slice(j, k);
+  if (!sym) return void ($('#arglist').innerHTML = '');
+  const seq = ++argSeq;
+  const info = await (await fetch(`/lookup?c=${C}&sym=${encodeURIComponent(sym)}`)).json().catch(() => null);
+  if (seq !== argSeq) return;
+  $('#arglist').innerHTML = info && info['arglists-str']
+    ? `<b>${esc(sym)}</b>${esc(info['arglists-str'])}` : '';
+}
+
+/* ── input behaviour ─────────────────────────────────────────── */
+const PAIRS = { '(':')', '[':']', '{':'}', '"':'"' };
+function autogrow() {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + 'px';
+  // every path that changes the value already calls autogrow, so repainting here keeps the
+  // highlight layer in step without hunting down each assignment to input.value
+  paint();
+  scheduleInputLint();
+}
+
+/* Checks the buffer itself against the bridge's read-only /lint, debounced - most keystrokes
+   land mid-form, so this must not fire on every one of them. Auto-close pairing keeps typed
+   code balanced most of the time, so this should stay quiet unless you genuinely broke
+   something (deleted a closer, pasted an unbalanced block). */
+// A network hiccup must read as "unknown", never as "broken" - callers get null, not a thrown error.
+function lintCode(code) {
+  return fetch('/lint', { method:'POST', body: code }).then(r => r.json()).catch(() => null);
+}
+
+let inputLintTimer, inputLintSeq = 0;
+function setInputLint(bad, error) {
+  dock.classList.toggle('syntax-bad', bad);
+  $('#synerr').hidden = !bad;
+  $('#synerr').title = bad ? (error || 'syntax error') : '';
+}
+async function checkInputSyntax() {
+  const seq = ++inputLintSeq;
+  const r = await lintCode(input.value);
+  if (seq !== inputLintSeq) return;   // a later keystroke already made this answer stale
+  setInputLint(r ? r.ok === false : false, r && r.error);
+}
+function scheduleInputLint() {
+  clearTimeout(inputLintTimer);
+  if (!input.value.trim()) { setInputLint(false); return; }
+  inputLintTimer = setTimeout(checkInputSyntax, 300);
+}
+
+// Completions fire as you type (debounced) once the token is long enough - Tab is the
+// explicit trigger, not the only one.
+const debouncedCompletions = debounce(() => {
+  if (tokenBeforeCaret().text.length >= 2) requestCompletions(); else hideCmp();
+}, 140);
+const debouncedArglist = debounce(updateArglist, 180);
+input.addEventListener('input', () => {
+  autogrow();
+  debouncedCompletions();
+  debouncedArglist();
+});
+input.addEventListener('blur', () => { hideCmp(); paint(); });
+input.addEventListener('scroll', () => { hlLayer.scrollTop = input.scrollTop; hlLayer.scrollLeft = input.scrollLeft; });
+// caret moves without the value changing: arrows, clicks, focus
+document.addEventListener('selectionchange', () => { if (document.activeElement === input) paint(); });
+input.addEventListener('focus', paint);
+input.addEventListener('click', () => { hideCmp(); updateArglist(); });
+
+input.addEventListener('keydown', e => {
+  const open = cmp.classList.contains('show');
+  if (open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+    e.preventDefault(); sel = (sel + (e.key === 'ArrowDown' ? 1 : cands.length - 1)) % cands.length;
+    paintSel(); loadDoc(); return;
+  }
+  if (open && (e.key === 'Enter' || e.key === 'Tab')) { e.preventDefault(); accept(); return; }
+  if (open && e.key === 'Escape') { e.preventDefault(); hideCmp(); return; }
+
+  if (e.key === 'Tab') { e.preventDefault(); requestCompletions(); return; }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); return; }
+  if (e.key === 'Escape') { e.preventDefault(); stop(); return; }
+  if (e.key === 'ArrowUp' && input.selectionStart === 0 && histIx > 0) {
+    e.preventDefault(); histIx--; input.value = history[histIx]; autogrow(); return;
+  }
+  if (e.key === 'ArrowDown' && input.selectionStart === input.value.length && histIx < history.length) {
+    e.preventDefault(); histIx++; input.value = history[histIx] || ''; autogrow(); return;
+  }
+
+  // Structural typing: type-over, auto-close, delete-pair.
+  const a = input.selectionStart, b = input.selectionEnd, v = input.value;
+  // Type-over is checked before auto-close so a closing " steps out of the pair
+  // instead of opening a new one (both live in PAIRS).
+  if ([')', ']', '}', '"'].includes(e.key) && a === b && v[a] === e.key) {
+    e.preventDefault(); input.setSelectionRange(a + 1, a + 1); return;
+  }
+  if (PAIRS[e.key] && a === b) {
+    e.preventDefault();
+    input.setRangeText(e.key + PAIRS[e.key], a, b, 'end');
+    input.setSelectionRange(a + 1, a + 1); autogrow(); return;
+  }
+  if (e.key === 'Backspace' && a === b && PAIRS[v[a - 1]] === v[a]) {
+    e.preventDefault(); input.setRangeText('', a - 1, a + 1, 'end'); autogrow(); return;
+  }
+});
+
+/* ── quick access pane (the notebook's (comment …) blocks) ───── */
+const qa = $('#qa'), palq = $('#palq'), palList = $('#pallist');
+let snippets = [], shown = [], palSel = 0, theme = null, snippetsLoaded = false;
+
+function setQA(open) {
+  qa.classList.toggle('collapsed', !open);
+  $('#snipbtn').classList.toggle('on', open);
+  ui.qa = open; saveUI();
+  if (open && !snippetsLoaded) loadSnippets();
+}
+function toggleQA() { setQA(qa.classList.contains('collapsed')); }
+
+/* Quick-access shortcuts and starter examples are project config, not app code - they
+   come from /config (backed by config.edn, see config.example.edn) so this file stays
+   free of any particular app's namespaces. */
+async function loadSnippets() {
+  snippetsLoaded = true;
+  let cfg = {}, fetched = [];
+  try {
+    [cfg, fetched] = await Promise.all([
+      fetch('/config').then(r => r.json()).catch(() => ({})),
+      fetch('/snippets').then(r => r.json()).catch(() => []),
+    ]);
+  } catch (err) { console.error('loading snippets failed:', err); }
+  if (!cfg || typeof cfg !== 'object') cfg = {};
+  if (!Array.isArray(fetched)) fetched = [];
+  const starters = (Array.isArray(cfg.starters) ? cfg.starters : [])
+    .map(code => ({ theme: 'examples', title: code, code }));
+  const quickAccess = (Array.isArray(cfg.quickAccess) ? cfg.quickAccess : [])
+    .filter(pair => Array.isArray(pair) && pair.length === 2)
+    .map(([title, code]) => ({ theme: cfg.quickAccessTheme || 'quick access', title, code }));
+  if (cfg.title) document.title = cfg.title;
+  snippets = [...starters, ...quickAccess, ...fetched];
+  const themes = [...new Set(snippets.map(s => s.theme))].sort();
+  $('#palchips').innerHTML = themes
+    .map(t => `<button class="chip" data-t="${esc(t)}">${esc(t)}</button>`).join('');
+  $('#palchips').querySelectorAll('.chip').forEach(c =>
+    c.addEventListener('click', () => { setTheme(theme === c.dataset.t ? null : c.dataset.t); }));
+  filterPalette();
+  lintSnippets();
+}
+
+/* One at a time against the bridge's dedicated lint session - a snippet's `_lintOk` is set
+   in place as each check lands, and the visible rows are updated without rebuilding the
+   whole list (filterPalette would reset the scroll position and the current selection). */
+const scheduleLintRepaint = debounce(paintLintMarks, 200);
+async function lintSnippets() {
+  for (const s of snippets) {
+    const r = await lintCode(s.code);
+    if (r && typeof r.ok === 'boolean') { s._lintOk = r.ok; s._lintError = r.error; }
+    scheduleLintRepaint();
+  }
+}
+function paintLintMarks() {
+  palList.querySelectorAll('.qa-row').forEach((r, i) => {
+    const s = shown[i], bad = s && s._lintOk === false;
+    r.classList.toggle('lint-bad', bad);
+    r.title = bad ? ('Might not read cleanly: ' + (s._lintError || 'syntax error')) : '';
+  });
+}
+
+function setTheme(t) {
+  theme = t;
+  $('#palchips').querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x.dataset.t === theme));
+  $('#themeclear').hidden = !theme;
+  filterPalette();
+}
+$('#themeclear').addEventListener('click', () => setTheme(null));
+
+function filterPalette() {
+  const raw = palq.value, q = raw.trim().toLowerCase();
+  shown = snippets.filter(s =>
+    (!theme || s.theme === theme) &&
+    (!q || (s.title + ' ' + s.code).toLowerCase().includes(q)));
+  palSel = 0;
+  $('#filterclear').hidden = !raw;
+  ui.filter = raw; saveUI();
+  $('#paln').textContent = `${shown.length} / ${snippets.length}`;
+  palList.innerHTML = shown.length
+    ? shown.map((s, i) => `<div class="qa-row" role="option" aria-selected="${i === 0}" data-i="${i}">
+         <div class="ti">${esc(s.title)}</div><div class="th">${esc(s.theme)}</div></div>`).join('')
+    : '<div class="qa-none">Nothing matches that filter.</div>';
+  palList.querySelectorAll('.qa-row').forEach(r => {
+    r.addEventListener('click', () => { palSel = +r.dataset.i; insertSnippet(); });
+  });
+  if (shown.length) paintPal();
+  paintLintMarks();
+}
+function paintPal() {
+  palList.querySelectorAll('.qa-row').forEach((r, i) => {
+    r.setAttribute('aria-selected', i === palSel);
+    if (i === palSel) r.scrollIntoView({ block:'nearest' });
+  });
+}
+function insertSnippet() {
+  const s = shown[palSel]; if (!s) return;
+  input.value = s.code;      // insert only - these touch production, you press Send yourself
+  autogrow(); updateArglist(); input.focus();
+}
+
+$('#snipbtn').addEventListener('click', toggleQA);
+$('#qacollapse').addEventListener('click', () => setQA(false));
+palq.addEventListener('input', filterPalette);
+$('#filterclear').addEventListener('click', () => { palq.value = ''; filterPalette(); palq.focus(); });
+palq.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { e.preventDefault(); setQA(false); input.focus(); }
+  else if (e.key === 'ArrowDown') { e.preventDefault(); palSel = Math.min(palSel + 1, shown.length - 1); paintPal(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); palSel = Math.max(palSel - 1, 0); paintPal(); }
+  else if (e.key === 'Enter') { e.preventDefault(); insertSnippet(); }
+});
+window.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    const open = qa.classList.contains('collapsed');
+    setQA(open);
+    if (open) palq.focus();
+  }
+});
+
+// Restoring persisted UI/pane state must never block connect() below - whatever happens
+// while replaying localStorage, the SSE connection still has to be attempted, or the
+// console is stuck on "connecting" forever with no way to recover short of clearing storage.
+try {
+  // remembered pane states, falling back to the old defaults on a first visit
+  if (typeof ui.filter === 'string') palq.value = ui.filter;
+  setQA(typeof ui.qa === 'boolean' ? ui.qa : window.innerWidth > 1100);
+  setRail(ui.rail === true);
+  setPprint(pprint);                 // paint the toggle to match the remembered choice
+} catch (e) { console.error('restoring pane state failed:', e); }
+try { restoreTranscript(); } catch (e) { console.error('restoreTranscript failed:', e); }
+try { restoreTaps(); } catch (e) { console.error('restoreTaps failed:', e); }
+try { autogrow(); } catch (e) { console.error('autogrow failed:', e); }  // rows=1 plus a measured height
+connect();
+</script>
+</body>
+</html>
