@@ -90,37 +90,45 @@
 (defn- new-id [] (str (UUID/randomUUID)))
 (defn- done? [msg] (contains? (set (:status msg)) "done"))
 
-(defn- send! [msg]
-  (let [{:keys [out lock]} @conn]
-    (locking lock
-      (bencode/write-bencode out msg)
-      (.flush out))))
+(defn- send!
+  "False, rather than throwing, while the nREPL socket is down (not up yet, or lost and
+   awaiting reconnect)."
+  [msg]
+  (if-let [{:keys [out lock]} @conn]
+    (try (locking lock
+           (bencode/write-bencode out msg)
+           (.flush out))
+         true
+         (catch java.io.IOException _ false))
+    false))
 
 (defn request!
-  "Sends `msg` (must carry its own \"id\"), routing every reply to `on-msg` until done."
+  "Sends `msg` (must carry its own \"id\"), routing every reply to `on-msg` until done.
+   False if it couldn't be sent."
   [msg on-msg]
   (let [id (get msg "id")]
     (swap! handlers assoc id (fn [m]
                                (on-msg m)
                                (when (done? m) (swap! handlers dissoc id))))
-    (send! msg)))
+    (or (send! msg) (do (swap! handlers dissoc id) false))))
 
 (defn blocking!
   "Sends `msg` (no id needed) and returns every reply up to `done`."
   [msg]
   (let [acc (atom [])
         p   (promise)]
-    (request! (assoc msg "id" (new-id))
-              (fn [m]
-                (swap! acc conj m)
-                (when (done? m) (deliver p @acc))))
-    (deref p 10000 [])))
+    (if (request! (assoc msg "id" (new-id))
+                  (fn [m]
+                    (swap! acc conj m)
+                    (when (done? m) (deliver p @acc))))
+      (deref p 10000 [])
+      [])))
 
 (defn new-session! []
   (let [p (promise)]
-    (request! {"op" "clone" "id" (new-id)}
-              (fn [m] (when-let [s (:new-session m)] (deliver p s))))
-    (deref p 5000 nil)))
+    (when (request! {"op" "clone" "id" (new-id)}
+                    (fn [m] (when-let [s (:new-session m)] (deliver p s))))
+      (deref p 5000 nil))))
 
 (defn eval-value
   "Blocking-evals `code` in `session` and reads its first :value back as data, or nil if
@@ -151,6 +159,7 @@
                     (recur)))
                 (catch Exception e
                   (println "[replweb] nrepl connection lost:" (.getMessage e))
+                  (reset! conn nil)
                   (when on-lost (on-lost)))))
             "nrepl-reader")
        (.setDaemon true)
@@ -387,9 +396,10 @@
                            (pr-str code))
           msgs (blocking! {"op" "eval" "code" wrapped "session" session})
           err  (apply str (keep :err msgs))]
-      (if (some :ex msgs)
-        {:ok false :error (if (seq err) (first (str/split-lines err)) "syntax error")}
-        {:ok true}))
+      (cond
+        (empty? msgs)   {:ok nil}   ; never sent, or timed out: unknown, not clean
+        (some :ex msgs) {:ok false :error (if (seq err) (first (str/split-lines err)) "syntax error")}
+        :else           {:ok true}))
     {:ok nil}))
 
 ;; ─────────────────────────────────────────────────────────────────────────────
@@ -573,23 +583,25 @@
                       (assoc "nrepl.middleware.print/print" "nrepl.util.print/pprint"
                              "nrepl.middleware.print/options" {"right-margin" 92}))]
         (swap! tabs assoc-in [id :running] eval-id)
-        (request! msg
-                  (fn [m]
-                    (when-let [ns' (:ns m)] (swap! tabs assoc-in [id :ns] ns'))
-                    (when-let [v (:out m)]   (emit! id "msg" {:t "out" :v v}))
-                    (when-let [v (:err m)]   (emit! id "msg" {:t "err" :v v}))
-                    (when-let [v (:value m)] (emit! id "msg" {:t "value" :v v :ns (:ns m)}))
-                    (when (:ex m)            (emit! id "msg" {:t "ex" :v (:ex m)}))
-                    (when (done? m)
-                      (swap! tabs assoc-in [id :running] nil)
-                      (keep-result! session rid)
-                      (emit! id "msg" {:t "done"
-                                       :rid rid
-                                       :ms (quot (- (System/nanoTime) t0) 1000000)
-                                       :ns (get-in @tabs [id :ns])
-                                       :interrupted (boolean
-                                                     (some #{"interrupted"} (:status m)))}))))
-        {:status 202 :body ""}))
+        (if (request! msg
+                      (fn [m]
+                        (when-let [ns' (:ns m)] (swap! tabs assoc-in [id :ns] ns'))
+                        (when-let [v (:out m)]   (emit! id "msg" {:t "out" :v v}))
+                        (when-let [v (:err m)]   (emit! id "msg" {:t "err" :v v}))
+                        (when-let [v (:value m)] (emit! id "msg" {:t "value" :v v :ns (:ns m)}))
+                        (when (:ex m)            (emit! id "msg" {:t "ex" :v (:ex m)}))
+                        (when (done? m)
+                          (swap! tabs assoc-in [id :running] nil)
+                          (keep-result! session rid)
+                          (emit! id "msg" {:t "done"
+                                           :rid rid
+                                           :ms (quot (- (System/nanoTime) t0) 1000000)
+                                           :ns (get-in @tabs [id :ns])
+                                           :interrupted (boolean
+                                                         (some #{"interrupted"} (:status m)))}))))
+          {:status 202 :body ""}
+          (do (swap! tabs assoc-in [id :running] nil)
+              {:status 503 :body ""}))))
     {:status 409 :body ""}))
 
 (defn- h-stop [req]

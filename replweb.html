@@ -1252,8 +1252,12 @@ async function send() {
   catch (err) { console.error('could not persist history:', err); }
   input.value = ''; autogrow(); setBusy(true); $('#arglist').innerHTML = '';
   newBlock(code);
-  try { await fetch(`/eval?c=${C}${pprint ? '&pprint=1' : ''}`, { method:'POST', body:code }); }
-  catch { streamEl('err').textContent += '\n(could not reach the bridge)'; running = null; setBusy(false); }
+  const fail = why => { streamEl('err').textContent += `\n(${why})`; running = null; setBusy(false); };
+  try {
+    const r = await fetch(`/eval?c=${C}${pprint ? '&pprint=1' : ''}`, { method:'POST', body:code });
+    if (!r.ok) fail(r.status === 503 ? 'nREPL not connected - reconnecting in the background'
+                                     : `eval refused (HTTP ${r.status})`);
+  } catch { fail('could not reach the bridge'); }
 }
 function stop() { if (running) fetch('/stop?c=' + C, { method:'POST' }); }
 sendBtn.addEventListener('click', send);
