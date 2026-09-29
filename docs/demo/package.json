@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "description": "Records docs/demo.gif",
+  "devDependencies": { "playwright-core": "^1.63.0" }
+}

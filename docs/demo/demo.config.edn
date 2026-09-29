@@ -1,0 +1,6 @@
+;; webrepl config for the demo recording (paths relative to docs/demo, where record.sh runs)
+{:title "demo-app · webrepl"
+ :home-ns "demo.app"
+ :notebook "src/demo/notebook.clj"
+ :quick-access [["Order stats" "(stats)"]]
+ :starters ["(println \"Hello, webrepl!\")"]}

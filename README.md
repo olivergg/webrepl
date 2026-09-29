@@ -3,6 +3,8 @@
 A single-file [Babashka](https://babashka.org) web console for a running JVM's in-process
 nREPL.
 
+![webrepl demo: eval, pretty-printed results, .method completion, tap> inspector, notebook snippets](docs/demo.gif)
+
 No build step, no dependencies beyond Babashka (tested with v1.13), which bundles the
 `org.httpkit`/`bencode`/`cheshire` it uses. Two files: `webrepl.clj` (server +
 nREPL client) and `webrepl.html` (the page, inlined CSS/JS, zero external requests - see
