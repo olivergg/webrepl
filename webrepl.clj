@@ -26,7 +26,9 @@
 ;; home namespace) live in config.edn - see config.example.edn - so this file and
 ;; webrepl.html stay usable against any nREPL, not just one particular app.
 
-(require '[bencode.core :as bencode]
+(require '[babashka.cli :as cli]
+         '[babashka.fs :as fs]
+         '[bencode.core :as bencode]
          '[cheshire.core :as json]
          '[clojure.edn :as edn]
          '[clojure.java.io :as io]
@@ -36,8 +38,6 @@
 
 (import '[java.io PushbackInputStream BufferedOutputStream]
         '[java.net Socket URLDecoder]
-        '[java.nio.file Files]
-        '[java.nio.file.attribute FileAttribute PosixFilePermissions]
         '[java.security MessageDigest SecureRandom]
         '[java.util UUID])
 
@@ -74,7 +74,7 @@
 
 (defn- load-config [path]
   (let [config (merge default-config
-                      (when (and path (.exists (io/file path)))
+                      (when (and path (fs/exists? path))
                         (edn/read-string (slurp path))))]
     ;; spliced into (in-ns '...) that runs on every tab open, no click needed
     (when-not (re-matches bare-symbol (str (:home-ns config)))
@@ -119,12 +119,13 @@
 (defn request!
   "Sends `msg` (must carry its own \"id\"), routing every reply to `on-msg` until done.
    False if it couldn't be sent."
-  [msg on-msg]
-  (let [id (get msg "id")]
-    (swap! handlers assoc id (fn [m]
-                               (on-msg m)
-                               (when (done? m) (swap! handlers dissoc id))))
-    (or (send! msg) (do (swap! handlers dissoc id) false))))
+  ([msg] (request! msg (constantly nil)))
+  ([msg on-msg]
+   (let [id (get msg "id")]
+     (swap! handlers assoc id (fn [m]
+                                (on-msg m)
+                                (when (done? m) (swap! handlers dissoc id))))
+     (or (send! msg) (do (swap! handlers dissoc id) false)))))
 
 (defn blocking!
   "Sends `msg` (no id needed) and returns every reply up to `done`."
@@ -144,15 +145,20 @@
                     (fn [m] (when-let [s (:new-session m)] (deliver p s))))
       (deref p 5000 nil))))
 
+(defn- read-edn
+  "nil if `s` doesn't read. edn/read-string, never read-string: the app produces what we read
+   back, but it crosses a socket."
+  [s]
+  (try (edn/read-string s) (catch Exception _ nil)))
+
 (defn eval-value
   "Blocking-evals `code` in `session` and reads its first :value back as data, or nil if
-   there wasn't one or it didn't read as EDN - the app produces this, but it crosses a
-   socket, hence edn/read-string rather than read-string."
+   there wasn't one or it didn't read as EDN."
   [session code]
   (->> (blocking! {"op" "eval" "code" code "session" session})
        (keep :value)
        first
-       (#(try (edn/read-string %) (catch Exception _ nil)))))
+       read-edn))
 
 (defn connect!
   "Opens the nREPL socket and starts its reader thread. `on-lost`, if given, fires once the
@@ -347,8 +353,7 @@
   (let [[values remainder] (split-taps (str @tap-buf chunk))]
     (reset! tap-buf remainder)
     (doseq [v values]
-      ;; edn/read-string, never read-string: the app produces this, but it crosses a socket.
-      (when-let [desc (try (edn/read-string v) (catch Exception _ nil))]
+      (when-let [desc (read-edn v)]
         (broadcast! "tap" (assoc desc :at (System/currentTimeMillis)))))))
 
 (defonce ^:private inspect-session (atom nil))
@@ -358,7 +363,7 @@
 
 (defn- iq
   "Qualifies an inspector var with the namespace it was actually defined in."
-  [sym] (str @inspect-ns "/" sym))
+  [sym] (symbol @inspect-ns (name sym)))
 
 (defn start-tap-pump! []
   (if-let [session (new-session!)]
@@ -378,14 +383,14 @@
   "Shallow description of the node at `path` under tapped value `idx`, read back as data."
   [idx path]
   (when-let [session @inspect-session]
-    (eval-value session (format "(%s %d %s)" (iq "webrepl-node") idx (pr-str (vec path))))))
+    (eval-value session (pr-str `(~(iq 'webrepl-node) ~idx ~(vec path))))))
 
 (defn tap-result!
   "Pushes the value a transcript row produced into the inspector, from the inspect session so
    the user's own *1 *2 *3 are left alone."
   [rid]
   (when-let [session @inspect-session]
-    (->> (blocking! {"op" "eval" "code" (format "(%s %d)" (iq "webrepl-tap-result") rid)
+    (->> (blocking! {"op" "eval" "code" (pr-str `(~(iq 'webrepl-tap-result) ~rid))
                      "session" session})
          (keep :value)
          first
@@ -407,13 +412,12 @@
    inspector's, so it can't race a tab's eval or its *1 *2 *3."
   [code]
   (if-let [session (ensure-lint-session!)]
-    (let [wrapped (format "(binding [*read-eval* false]
-                             (let [rdr (clojure.lang.LineNumberingPushbackReader.
-                                         (java.io.StringReader. %s))]
-                               (loop [] (let [f (read rdr false :eof)]
-                                          (when-not (= f :eof) (recur))))))"
-                           (pr-str code))
-          msgs (blocking! {"op" "eval" "code" wrapped "session" session})
+    (let [wrapped `(binding [*read-eval* false]
+                     (let [rdr# (clojure.lang.LineNumberingPushbackReader.
+                                 (java.io.StringReader. ~code))]
+                       (loop [] (let [f# (read rdr# false :eof)]
+                                  (when-not (= f# :eof) (recur))))))
+          msgs (blocking! {"op" "eval" "code" (pr-str wrapped) "session" session})
           err  (apply str (keep :err msgs))]
       (cond
         (empty? msgs)   {:ok nil}   ; never sent, or timed out: unknown, not clean
@@ -447,17 +451,20 @@
 (defn connect-with-retry!
   "connect!, but on failure or a later drop, keeps trying with exponential backoff instead of
    leaving the bridge stuck on a dead socket. Covers both the target JVM not being up yet at
-   startup and it restarting later."
-  ([host port] (connect-with-retry! host port reconnect-base-ms))
-  ([host port wait-ms]
-   (try
-     (connect! host port #(connect-with-retry! host port reconnect-base-ms))
-     (on-reconnected!)
-     (catch Exception e
-       (println (format "[webrepl] nrepl connect failed (%s) - retrying in %dms"
-                         (.getMessage e) wait-ms))
-       (Thread/sleep ^long wait-ms)
-       (connect-with-retry! host port (min reconnect-max-ms (* wait-ms 2)))))))
+   startup and it restarting later. A loop, not recursion from the catch (recur can't cross
+   it): each failed attempt would otherwise add a stack frame for as long as the JVM is down."
+  [host port]
+  (loop [wait-ms reconnect-base-ms]
+    (when-not (try
+                (connect! host port #(connect-with-retry! host port))
+                (on-reconnected!)
+                true
+                (catch Exception e
+                  (println (format "[webrepl] nrepl connect failed (%s) - retrying in %dms"
+                                   (.getMessage e) wait-ms))
+                  false))
+      (Thread/sleep ^long wait-ms)
+      (recur (min reconnect-max-ms (* wait-ms 2))))))
 
 ;; ─────────────────────────────────────────────────────────────────────────────
 ;; Snippet library — the (comment ...) blocks of a Clojure notebook, by theme
@@ -495,7 +502,7 @@
   "Each top-level (comment ...) form becomes one snippet: its first ;;-line is the title,
    the rest is ready-to-paste code (the wrapper and the title line stripped)."
   [path themes]
-  (if-not (and path (.exists (io/file path)))
+  (if-not (and path (fs/exists? path))
     []
     (let [src (slurp path)]
       (->> (loop [i 0, out []]
@@ -509,14 +516,14 @@
                          title? #(str/starts-with? (str/trim %) ";")
                          title  (some->> body (filter title?) first str/trim
                                          (re-find #"^;+\s*(.*)$") second str/trim)
-                         code   (->> body
-                                     (remove #(= (str/trim %) ""))
-                                     (drop-while title?)           ; leading description
-                                     (str/join "\n")
-                                     ;; the block's trailing ")" closes (comment - drop it
-                                     (#(str/replace % #"\)\s*$" ""))
-                                     str/trim)]
-                     (when (and (seq code) (seq title) (not= title ""))
+                         code   (-> (->> body
+                                         (remove str/blank?)
+                                         (drop-while title?)       ; leading description
+                                         (str/join "\n"))
+                                    ;; the block's trailing ")" closes (comment - drop it
+                                    (str/replace #"\)\s*$" "")
+                                    str/trim)]
+                     (when (and (seq code) (seq title))
                        {:title title
                         :code  (str/replace code #"(?m)^  " "")     ; unindent one level
                         :theme (theme-of themes (str title " " code))}))))
@@ -527,11 +534,14 @@
 ;; HTTP
 ;; ─────────────────────────────────────────────────────────────────────────────
 
-(defn- params [req]
-  (->> (str/split (or (:query-string req) "") #"&")
-       (keep #(let [[k v] (str/split % #"=" 2)]
-                (when (seq k) [k (URLDecoder/decode (or v "") "UTF-8")])))
-       (into {})))
+;; http-kit leaves the query string raw: parse it once, Ring-style, for every handler.
+(defn- wrap-params [handler]
+  (fn [req]
+    (handler (assoc req :params
+                    (->> (str/split (or (:query-string req) "") #"&")
+                         (keep #(let [[k v] (str/split % #"=" 2)]
+                                  (when (seq k) [k (URLDecoder/decode (or v "") "UTF-8")])))
+                         (into {}))))))
 
 (defn- json-res [body]
   {:status 200 :headers {"Content-Type" "application/json; charset=utf-8"
@@ -539,12 +549,12 @@
                          "X-Content-Type-Options" "nosniff"}
    :body (json/generate-string body)})
 
-(defn- tab-of [req]
-  (let [id (get (params req) "c")]
-    (when-let [t (get @tabs id)] (when (:session t) (assoc t :id id)))))
+(defn- tab-of [{:keys [params]}]
+  (let [id (params "c"), t (get @tabs id)]
+    (when (:session t) (assoc t :id id))))
 
-(defn- h-stream [req nrepl-endpoint home-ns]
-  (let [id (get (params req) "c")]
+(defn- h-stream [{:keys [params] :as req} nrepl-endpoint home-ns]
+  (let [id (params "c")]
     (hk/as-channel req
       {:on-open
        (fn [ch]
@@ -557,11 +567,11 @@
          (if-let [session (new-session!)]
            (do
              (swap! tabs assoc-in [id :session] session)
-             (request! {"op" "eval" "code" (str "(in-ns '" home-ns ")")
-                        "session" session "id" (new-id)} (fn [_]))
+             (request! {"op" "eval" "code" (pr-str `(in-ns '~(symbol home-ns)))
+                        "session" session "id" (new-id)})
              (request! {"op" "eval"
-                        "code" (str "[(str (java.net.InetAddress/getLocalHost))"
-                                    " (System/getProperty \"env.profile\")]")
+                        "code" (pr-str '[(str (java.net.InetAddress/getLocalHost))
+                                         (System/getProperty "env.profile")])
                         "session" session "id" (new-id)}
                        (fn [m]
                          (when-let [v (:value m)]
@@ -571,7 +581,7 @@
            (emit! id "ready" {:ns "?" :error "could not open an nREPL session"})))
        :on-close (fn [_ _]
                    (when-let [s (get-in @tabs [id :session])]
-                     (request! {"op" "close" "session" s "id" (new-id)} (fn [_])))
+                     (request! {"op" "close" "session" s "id" (new-id)}))
                    (swap! tabs dissoc id))})))
 
 (defonce ^:private result-n (atom 0))
@@ -583,11 +593,10 @@
    take a duplicate. Without this the inspect button had to send (tap> *N) itself, and that
    eval shifted the very history it was counting on - the reason it worked every other click."
   [session rid]
-  (request! {"op" "eval" "code" (format "(do (%s %d *1) *1)" (iq "webrepl-keep") rid)
-             "session" session "id" (new-id)}
-            (fn [_])))
+  (request! {"op" "eval" "code" (pr-str `(do (~(iq 'webrepl-keep) ~rid *1) *1))
+             "session" session "id" (new-id)}))
 
-(defn- h-eval [req]
+(defn- h-eval [{:keys [params] :as req}]
   (if-let [{:keys [id session running]} (tab-of req)]
     (if running
       {:status 429 :body ""}
@@ -596,7 +605,7 @@
             rid     (swap! result-n inc)
             t0      (System/nanoTime)
             msg     (cond-> {"op" "eval" "code" code "session" session "id" eval-id}
-                      (= "1" (get (params req) "pprint"))
+                      (= "1" (params "pprint"))
                       ;; nrepl.util.print/pprint, not clojure.pprint/pprint: only the former
                       ;; has the [value writer options] arity wrap-print calls, so only it
                       ;; honours :right-margin.
@@ -628,13 +637,13 @@
   (if-let [{:keys [session running]} (tab-of req)]
     (do (when running
           (request! {"op" "interrupt" "session" session
-                     "interrupt-id" running "id" (new-id)} (fn [_])))
+                     "interrupt-id" running "id" (new-id)}))
         {:status 202 :body ""})
     {:status 404 :body ""}))
 
-(defn- h-complete [req]
+(defn- h-complete [{:keys [params] :as req}]
   (let [{:keys [session ns]} (tab-of req)
-        prefix (get (params req) "prefix")]
+        prefix (params "prefix")]
     (json-res
      (if (and session (seq prefix))
        (->> (blocking! {"op" "completions" "prefix" prefix "ns" ns "session" session})
@@ -647,22 +656,23 @@
    value, via reflection on the target JVM - no cider-nrepl needed. `sym` must already be
    bound (typically a (def ...)'d service): completing (-> s .foo) needs `s` bound first,
    since there's no static type info to fall back on here."
-  [req]
+  [{:keys [params] :as req}]
   (let [{:keys [session]} (tab-of req)
-        sym    (get (params req) "sym")
-        prefix (or (get (params req) "prefix") "")]
+        sym    (params "sym")
+        prefix (params "prefix" "")]
     (json-res
+     ;; still validated: (symbol "(x)") prints as the form (x), so data alone isn't enough
      (if (and session sym (re-matches bare-symbol sym))
        (->> (eval-value session
-                        (format "(->> (.getMethods (class %s)) (map (fn [m] (.getName m))) distinct sort vec)"
-                                sym))
+                        (pr-str `(->> (.getMethods (class ~(symbol sym)))
+                                      (map (fn [m#] (.getName m#))) distinct sort vec)))
             (filter #(str/starts-with? % prefix))
             vec)
        []))))
 
-(defn- h-lookup [req]
+(defn- h-lookup [{:keys [params] :as req}]
   (let [{:keys [session ns]} (tab-of req)
-        sym (get (params req) "sym")]
+        sym (params "sym")]
     (json-res
      (when (and session (seq sym))
        (->> (blocking! {"op" "lookup" "sym" sym "ns" ns "session" session})
@@ -672,18 +682,17 @@
 
 (defn- h-inspect
   "GET /inspect?i=<tap index>&path=1.0.3 — one level of the tapped value's tree."
-  [req]
-  (let [p    (params req)
-        idx  (parse-long (or (get p "i") ""))
-        path (->> (str/split (or (get p "path") "") #"\.")
+  [{:keys [params]}]
+  (let [idx  (some-> (params "i") parse-long)
+        path (->> (str/split (params "path" "") #"\.")
                   (keep parse-long)
                   vec)]
     (json-res (when idx (inspect-node idx path)))))
 
 (defn- h-inspect-result
   "POST /inspect-result?rid=<result id> — sends that row's value to the inspector."
-  [req]
-  (if-let [rid (parse-long (or (get (params req) "rid") ""))]
+  [{:keys [params]}]
+  (if-let [rid (some-> (params "rid") parse-long)]
     (json-res {:ok (boolean (tap-result! rid))})
     {:status 400 :body ""}))
 
@@ -703,7 +712,7 @@
        "</g></svg>"))
 
 (defn- h-page [html-path nrepl-endpoint]
-  (let [html (if (.exists (io/file html-path))
+  (let [html (if (fs/exists? html-path)
                (slurp html-path)
                (slurp (io/resource "webrepl.html")))
         ;; fresh per response: only the page's own <script> runs, so markup that slips past
@@ -734,27 +743,23 @@
 ;; Same-origin checks stop other sites, not other local processes: anything on this machine
 ;; can reach 127.0.0.1. The token closes that. Persisted (owner-only) rather than per-run so a
 ;; bridge restart doesn't log every open tab out; delete the file to rotate it.
-(def ^:private token-file (io/file (System/getProperty "user.home") ".webrepl-token"))
-
 (defn- load-or-create-token
   "Anything but 64 hex chars (e.g. left empty by a crash mid-write) is replaced: an empty
    token would match an empty cookie."
   []
-  ;; former name: move rather than orphan a live secret next to the new one
-  (let [old (io/file (.getParent token-file) ".replweb-token")]
-    (when (and (.exists old) (not (.exists token-file)))
-      (Files/move (.toPath old) (.toPath token-file) (make-array java.nio.file.CopyOption 0))))
-  (or (when (.exists token-file)
-        (re-matches #"[0-9a-f]{64}" (str/trim (slurp token-file))))
-    (let [t (random-hex 256)]
-      (Files/deleteIfExists (.toPath token-file))
-      ;; created owner-only up front, never world-readable even briefly
-      (Files/createFile (.toPath token-file)
-                        (into-array FileAttribute
-                                    [(PosixFilePermissions/asFileAttribute
-                                      (PosixFilePermissions/fromString "rw-------"))]))
-      (spit token-file t)
-      t)))
+  (let [token-file (fs/file (fs/home) ".webrepl-token")
+        old        (fs/file (fs/home) ".replweb-token")]
+    ;; former name: move rather than orphan a live secret next to the new one
+    (when (and (fs/exists? old) (not (fs/exists? token-file)))
+      (fs/move old token-file))
+    (or (when (fs/exists? token-file)
+          (re-matches #"[0-9a-f]{64}" (str/trim (slurp token-file))))
+        (let [t (random-hex 256)]
+          (fs/delete-if-exists token-file)
+          ;; created owner-only up front, never world-readable even briefly
+          (fs/create-file token-file {:posix-file-permissions "rw-------"})
+          (spit token-file t)
+          t))))
 
 (defn- token= [token s]
   (and s (MessageDigest/isEqual (.getBytes ^String token "UTF-8") (.getBytes ^String s "UTF-8"))))
@@ -770,7 +775,7 @@
         {:status 403 :body ""}
 
         ;; the URL printed at startup: trade the token for a cookie, then drop it from the URL
-        (and (= "/" (:uri req)) (token= token (get (params req) "token")))
+        (and (= "/" (:uri req)) (token= token (get-in req [:params "token"])))
         {:status 302 :headers {"Location" "/"
                                "Set-Cookie" (str cookie "=" token
                                                  "; Path=/; HttpOnly; SameSite=Strict")}}
@@ -804,36 +809,32 @@
 
 ;; ─────────────────────────────────────────────────────────────────────────────
 
-(def ^:private usage
-  "Usage: webrepl.clj [options]
+(def ^:private cli-spec
+  {:nrepl    {:ref "HOST:PORT" :default "127.0.0.1:5555" :desc "nREPL socket to connect to"}
+   :port     {:ref "PORT" :default 7899 :coerce :long :desc "HTTP port to serve the console on"}
+   :notebook {:ref "PATH" :desc "Clojure file whose (comment ...) forms become snippets; overrides :notebook from config.edn"}
+   :config   {:ref "PATH" :default "config.edn" :desc "config.edn to load, see config.example.edn"}
+   :help     {:alias :h :coerce :boolean :desc "Show this help and exit"}})
 
-Options:
-  --nrepl HOST:PORT   nREPL socket to connect to (default 127.0.0.1:5555)
-  --port PORT         HTTP port to serve the console on (default 7899)
-  --notebook PATH     Clojure file whose (comment ...) forms become snippets;
-                       overrides :notebook from config.edn
-  --config PATH       config.edn to load (default ./config.edn), see config.example.edn
-  -h, --help          show this help and exit")
+(def ^:private usage
+  (str "Usage: webrepl.clj [options]\n\nOptions:\n"
+       (cli/format-opts {:spec cli-spec :order [:nrepl :port :notebook :config :help]})))
+
+(defn- parse-args
+  "Options, with --nrepl split into :nrepl-host/:nrepl-port. Prints usage and exits on bad
+   input (unknown option, missing or malformed value) or --help."
+  [args]
+  (let [fail          (fn [msg] (binding [*out* *err*] (println msg) (println usage)) (System/exit 2))
+        opts          (cli/parse-opts args {:spec cli-spec :restrict true
+                                            :error-fn (fn [{:keys [msg]}] (fail msg))})
+        [_ host port] (re-matches #"(.+):(\d+)" (str (:nrepl opts)))]
+    (cond
+      (:help opts) (do (println usage) (System/exit 0))
+      (not host)   (fail (str "--nrepl expects HOST:PORT, got " (pr-str (:nrepl opts))))
+      :else        (assoc opts :nrepl-host host :nrepl-port (parse-long port)))))
 
 (defn -main [& args]
-  (when (some #{"-h" "--help"} args)
-    (println usage)
-    (System/exit 0))
-  (let [opts (loop [[a v & more :as all] args, m {}]
-               (if (empty? all)
-                 m
-                 (recur more (case a
-                               "--port"     (assoc m :port (parse-long v))
-                               "--nrepl"    (let [[h p] (str/split v #":" 2)]
-                                              (assoc m :nrepl-host h :nrepl-port (parse-long p)))
-                               "--notebook" (assoc m :notebook v)
-                               "--config"   (assoc m :config-path v)
-                               (do (println "unknown arg:" a)
-                                   (println usage)
-                                   (System/exit 2))))))
-        {:keys [port nrepl-host nrepl-port notebook config-path]
-         :or   {port 7899 nrepl-host "127.0.0.1" nrepl-port 5555
-                config-path "config.edn"}} opts
+  (let [{:keys [port nrepl-host nrepl-port notebook] config-path :config} (parse-args args)
         config   (load-config config-path)
         notebook (or notebook (:notebook config))
         themes   (mapv (fn [[title pattern]] [title (re-pattern pattern)]) (:themes config))
@@ -846,10 +847,10 @@ Options:
     (future (connect-with-retry! nrepl-host nrepl-port))
     ;; next to this script, not the cwd: runnable from anywhere, and a stray webrepl.html in
     ;; whatever directory it's started from is never served as the trusted page
-    (hk/run-server (router {:html (str (io/file (.getParentFile (.getCanonicalFile (io/file *file*)))
-                                                "webrepl.html"))
+    (hk/run-server (wrap-params
+                    (router {:html (str (fs/path (fs/parent (fs/canonicalize *file*)) "webrepl.html"))
                              :nrepl-endpoint endpoint
-                             :snippets snippets :config config :port port :token token})
+                             :snippets snippets :config config :port port :token token}))
                    {:port port :ip "127.0.0.1"})
     (println (format "[webrepl] http://localhost:%d/?token=%s  ->  nrepl %s" port token endpoint))
     (println (if notebook
@@ -857,4 +858,6 @@ Options:
                "[webrepl] no notebook configured - see --notebook or :notebook in config.edn"))
     @(promise)))
 
-(apply -main *command-line-args*)
+;; only when run as a script: loading this file into a REPL must not start a server
+(when (= *file* (System/getProperty "babashka.file"))
+  (apply -main *command-line-args*))
