@@ -46,8 +46,11 @@ drops later, the bridge keeps retrying with backoff and reconnects once it's rea
 ## Security
 
 Binds to `127.0.0.1` only — this is arbitrary eval against a live JVM, never expose it beyond
-localhost. The page makes no external network requests (system fonts, no CDN) and ships a
-same-origin `Content-Security-Policy`.
+localhost. Every request must carry a localhost `Host` and, from a browser, a same-origin
+`Origin`/`Sec-Fetch-Site` (403 otherwise), so other sites can't reach it through your browser
+via CSRF or DNS rebinding. The page makes no external network requests (system fonts, no CDN)
+and is served with a same-origin `Content-Security-Policy` header, including
+`frame-ancestors 'none'`.
 
 ## Configuration
 

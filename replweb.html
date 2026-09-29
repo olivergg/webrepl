@@ -4,11 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Clojure nREPL console</title>
-<!-- Enforced, not just avoided: everything here is same-origin (relative fetches to the
-     bridge, inline style/script) - 'self' blocks any external network call the browser could
-     otherwise make, even one introduced by a future bug. -->
-<meta http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; font-src 'self'; frame-ancestors 'none'; form-action 'self'">
+<!-- Content-Security-Policy is sent as a response header by replweb.clj (h-page), not a
+     <meta>: browsers ignore frame-ancestors in <meta>. -->
 <style>
   :root {
     --paper:#F3F1EB; --card:#FBFAF6; --sunk:#EDEAE1; --ink:#2B2722; --ink-dim:#6C6459;
@@ -815,7 +812,7 @@ function hl(src, marks) {
   }
   return out;
 }
-function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 /* ── live highlighting of the editor ─────────────────────────── */
 /* Index of every bracket to the index of its partner. Strings, char literals and line

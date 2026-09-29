@@ -19,7 +19,8 @@
 ;; nrepl.util.lookup (built in since 1.2) - no cider-nrepl needed in the app.
 ;;
 ;; Each tab gets its own nREPL session, dropped into the configured home namespace.
-;; Bind is localhost-only: this is arbitrary eval against a live JVM.
+;; Bind is localhost-only and cross-site requests are refused (see `same-origin?`): this is
+;; arbitrary eval against a live JVM.
 ;;
 ;; Project-specific bits (title, quick-access shortcuts, starter snippets, notebook path,
 ;; home namespace) live in config.edn - see config.example.edn - so this file and
@@ -504,7 +505,8 @@
        (into {})))
 
 (defn- json-res [body]
-  {:status 200 :headers {"Content-Type" "application/json; charset=utf-8"}
+  {:status 200 :headers {"Content-Type" "application/json; charset=utf-8"
+                         "X-Content-Type-Options" "nosniff"}
    :body (json/generate-string body)})
 
 (defn- tab-of [req]
@@ -618,7 +620,8 @@
         sym    (get (params req) "sym")
         prefix (or (get (params req) "prefix") "")]
     (json-res
-     (if (and session (seq sym))
+     ;; `sym` is spliced into code: accept a bare symbol only, never a form
+     (if (and session sym (re-matches #"[\w.*+!?<>=/$-]+" sym))
        (->> (eval-value session
                         (format "(->> (.getMethods (class %s)) (map (fn [m] (.getName m))) distinct sort vec)"
                                 sym))
@@ -663,30 +666,49 @@
                (slurp html-path)
                (slurp (io/resource "replweb.html")))]
     {:status 200
-     :headers {"Content-Type" "text/html; charset=utf-8" "Cache-Control" "no-store"}
+     :headers {"Content-Type" "text/html; charset=utf-8" "Cache-Control" "no-store"
+               "X-Content-Type-Options" "nosniff"
+               ;; Everything is same-origin (relative fetches, inline style/script): 'self'
+               ;; blocks any external request, even one a future bug introduces.
+               "Content-Security-Policy"
+               (str "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                    "style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; "
+                    "font-src 'self'; frame-ancestors 'none'; form-action 'self'")}
      :body (str/replace html "__NREPL__" nrepl-endpoint)}))
 
-(defn- router [{:keys [html nrepl-endpoint snippets config]}]
+(defn- same-origin?
+  "Localhost binding alone doesn't stop other sites: the user's own browser can still reach
+   us via CSRF (cross-site fetch/iframe) or DNS rebinding. Host defeats rebinding; Origin and
+   Sec-Fetch-Site (absent on non-browser clients like curl) defeat cross-site requests."
+  [{:keys [headers]} port]
+  (let [{:strs [host origin sec-fetch-site]} headers]
+    (and (#{(str "127.0.0.1:" port) (str "localhost:" port)} host)
+         (or (nil? origin) (= origin (str "http://" host)))
+         (contains? #{nil "same-origin" "none"} sec-fetch-site))))
+
+(defn- router [{:keys [html nrepl-endpoint snippets config port]}]
   (let [home-ns (:home-ns config)]
     (fn [req]
-      (case (:uri req)
-        "/"            (h-page html nrepl-endpoint)
-        "/stream"      (h-stream req nrepl-endpoint home-ns)
-        "/eval"        (h-eval req)
-        "/stop"        (h-stop req)
-        "/complete"    (h-complete req)
-        "/members"     (h-members req)
-        "/lookup"      (h-lookup req)
-        "/inspect"     (h-inspect req)
-        "/inspect-result" (h-inspect-result req)
-        "/lint"        (h-lint req)
-        "/snippets"    (json-res (snippets))
-        "/config"      (json-res {:title (:title config)
-                                   :quickAccess (:quick-access config)
-                                   :quickAccessTheme (:quick-access-theme config)
-                                   :starters (:starters config)})
-        "/favicon.ico" {:status 204 :body ""}
-        {:status 404 :body ""}))))
+      (if-not (same-origin? req port)
+        {:status 403 :body ""}
+        (case (:uri req)
+          "/"            (h-page html nrepl-endpoint)
+          "/stream"      (h-stream req nrepl-endpoint home-ns)
+          "/eval"        (h-eval req)
+          "/stop"        (h-stop req)
+          "/complete"    (h-complete req)
+          "/members"     (h-members req)
+          "/lookup"      (h-lookup req)
+          "/inspect"     (h-inspect req)
+          "/inspect-result" (h-inspect-result req)
+          "/lint"        (h-lint req)
+          "/snippets"    (json-res (snippets))
+          "/config"      (json-res {:title (:title config)
+                                     :quickAccess (:quick-access config)
+                                     :quickAccessTheme (:quick-access-theme config)
+                                     :starters (:starters config)})
+          "/favicon.ico" {:status 204 :body ""}
+          {:status 404 :body ""})))))
 
 ;; ─────────────────────────────────────────────────────────────────────────────
 
@@ -730,7 +752,7 @@ Options:
     ;; HTTP server - tabs already cope with "no session yet" until this succeeds.
     (future (connect-with-retry! nrepl-host nrepl-port))
     (hk/run-server (router {:html "replweb.html" :nrepl-endpoint endpoint
-                             :snippets snippets :config config})
+                             :snippets snippets :config config :port port})
                    {:port port :ip "127.0.0.1"})
     (println (format "[replweb] http://localhost:%d  ->  nrepl %s" port endpoint))
     (println (if notebook
