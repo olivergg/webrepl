@@ -1,4 +1,7 @@
 #!/usr/bin/env bb
+;; SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-or-later WITH Classpath-exception-2.0
+;; Copyright (c) 2026 Olivier G
+;;
 ;; A web console for a running JVM's in-process nREPL.
 ;;
 ;;     ./webrepl.clj [--port 7899] [--nrepl 127.0.0.1:5555] [--notebook PATH] [--config PATH]
