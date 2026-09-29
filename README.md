@@ -14,7 +14,8 @@ Security below).
 ./replweb.clj --nrepl 127.0.0.1:5555 [--port 7899] [--notebook PATH] [--config PATH]
 ```
 
-Then open `http://localhost:7899`. Each browser tab gets its own nREPL session, dropped
+Then open the `http://localhost:7899/?token=…` URL it prints (once: it's traded for a cookie,
+see Security). Each browser tab gets its own nREPL session, dropped
 into the configured home namespace. If the target JVM isn't up yet, or its nREPL connection
 drops later, the bridge keeps retrying with backoff and reconnects once it's reachable again.
 
@@ -48,7 +49,9 @@ drops later, the bridge keeps retrying with backoff and reconnects once it's rea
 Binds to `127.0.0.1` only — this is arbitrary eval against a live JVM, never expose it beyond
 localhost. Every request must carry a localhost `Host` and, from a browser, a same-origin
 `Origin`/`Sec-Fetch-Site` (403 otherwise), so other sites can't reach it through your browser
-via CSRF or DNS rebinding. The page makes no external network requests (system fonts, no CDN)
+via CSRF or DNS rebinding. Local processes are kept out by a token: generated once into
+`~/.replweb-token` (owner-only, reused across restarts; delete it to rotate), exchanged on first
+visit for an `HttpOnly; SameSite=Strict` cookie, required on every request (401 otherwise). The page makes no external network requests (system fonts, no CDN)
 and is served with a same-origin `Content-Security-Policy` header, including
 `frame-ancestors 'none'`.
 

@@ -36,6 +36,9 @@
 
 (import '[java.io PushbackInputStream BufferedOutputStream]
         '[java.net Socket URLDecoder]
+        '[java.nio.file Files]
+        '[java.nio.file.attribute FileAttribute PosixFilePermissions]
+        '[java.security MessageDigest SecureRandom]
         '[java.util UUID])
 
 ;; ─────────────────────────────────────────────────────────────────────────────
@@ -64,9 +67,14 @@
    :themes default-themes})
 
 (defn- load-config [path]
-  (merge default-config
-         (when (and path (.exists (io/file path)))
-           (edn/read-string (slurp path)))))
+  (let [config (merge default-config
+                      (when (and path (.exists (io/file path)))
+                        (edn/read-string (slurp path))))]
+    ;; spliced into (in-ns '...) that runs on every tab open, no click needed
+    (when-not (re-matches #"[\w.*+!?<>=$-]+" (str (:home-ns config)))
+      (throw (ex-info (str "config: :home-ns must be a bare namespace name, got "
+                           (pr-str (:home-ns config))) {})))
+    config))
 
 ;; Identifies this bridge process. It rides along on `ready` so a browser restoring a
 ;; persisted transcript can tell whether its stored result ids still mean anything: result-n
@@ -516,6 +524,7 @@
 
 (defn- json-res [body]
   {:status 200 :headers {"Content-Type" "application/json; charset=utf-8"
+                         "Cache-Control" "no-store"      ; may carry data from a prod JVM
                          "X-Content-Type-Options" "nosniff"}
    :body (json/generate-string body)})
 
@@ -698,11 +707,51 @@
          (or (nil? origin) (= origin (str "http://" host)))
          (contains? #{nil "same-origin" "none"} sec-fetch-site))))
 
-(defn- router [{:keys [html nrepl-endpoint snippets config port]}]
-  (let [home-ns (:home-ns config)]
+;; Same-origin checks stop other sites, not other local processes: anything on this machine
+;; can reach 127.0.0.1. The token closes that. Persisted (owner-only) rather than per-run so a
+;; bridge restart doesn't log every open tab out; delete the file to rotate it.
+(def ^:private token-file (io/file (System/getProperty "user.home") ".replweb-token"))
+
+(defn- load-or-create-token
+  "Anything but 64 hex chars (e.g. left empty by a crash mid-write) is replaced: an empty
+   token would match an empty cookie."
+  []
+  (or (when (.exists token-file)
+        (re-matches #"[0-9a-f]{64}" (str/trim (slurp token-file))))
+    (let [t (format "%064x" (BigInteger. 256 (SecureRandom.)))]
+      (Files/deleteIfExists (.toPath token-file))
+      ;; created owner-only up front, never world-readable even briefly
+      (Files/createFile (.toPath token-file)
+                        (into-array FileAttribute
+                                    [(PosixFilePermissions/asFileAttribute
+                                      (PosixFilePermissions/fromString "rw-------"))]))
+      (spit token-file t)
+      t)))
+
+(defn- token= [token s]
+  (and s (MessageDigest/isEqual (.getBytes ^String token "UTF-8") (.getBytes ^String s "UTF-8"))))
+
+(defn- router [{:keys [html nrepl-endpoint snippets config port token]}]
+  (let [home-ns (:home-ns config)
+        ;; per port: browsers share localhost cookies across ports
+        cookie  (str "replweb-" port)
+        cookie-re (re-pattern (str "(?:^|;\\s*)" cookie "=([^;]*)"))]
     (fn [req]
-      (if-not (same-origin? req port)
+      (cond
+        (not (same-origin? req port))
         {:status 403 :body ""}
+
+        ;; the URL printed at startup: trade the token for a cookie, then drop it from the URL
+        (and (= "/" (:uri req)) (token= token (get (params req) "token")))
+        {:status 302 :headers {"Location" "/"
+                               "Set-Cookie" (str cookie "=" token
+                                                 "; Path=/; HttpOnly; SameSite=Strict")}}
+
+        (not (token= token (some->> (get-in req [:headers "cookie"]) (re-find cookie-re) second)))
+        {:status 401 :headers {"Content-Type" "text/plain; charset=utf-8"}
+         :body "replweb: open the http://localhost:PORT/?token=... URL printed at startup.\n"}
+
+        :else
         (case (:uri req)
           "/"            (h-page html nrepl-endpoint)
           "/stream"      (h-stream req nrepl-endpoint home-ns)
@@ -759,14 +808,19 @@ Options:
         themes   (mapv (fn [[title pattern]] [title (re-pattern pattern)]) (:themes config))
         endpoint (str nrepl-host ":" nrepl-port)
         ;; A thunk, not a cached value: editing the notebook shows up on a browser reload.
-        snippets #(parse-notebook notebook themes)]
+        snippets #(parse-notebook notebook themes)
+        token    (load-or-create-token)]
     ;; Backgrounded: retrying (with the target JVM possibly not up yet) must not hold up the
     ;; HTTP server - tabs already cope with "no session yet" until this succeeds.
     (future (connect-with-retry! nrepl-host nrepl-port))
-    (hk/run-server (router {:html "replweb.html" :nrepl-endpoint endpoint
-                             :snippets snippets :config config :port port})
+    ;; next to this script, not the cwd: runnable from anywhere, and a stray replweb.html in
+    ;; whatever directory it's started from is never served as the trusted page
+    (hk/run-server (router {:html (str (io/file (.getParentFile (.getCanonicalFile (io/file *file*)))
+                                                "replweb.html"))
+                             :nrepl-endpoint endpoint
+                             :snippets snippets :config config :port port :token token})
                    {:port port :ip "127.0.0.1"})
-    (println (format "[replweb] http://localhost:%d  ->  nrepl %s" port endpoint))
+    (println (format "[replweb] http://localhost:%d/?token=%s  ->  nrepl %s" port token endpoint))
     (println (if notebook
                (format "[replweb] %d snippets from %s" (count (snippets)) notebook)
                "[replweb] no notebook configured - see --notebook or :notebook in config.edn"))
