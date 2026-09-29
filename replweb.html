@@ -893,16 +893,19 @@ function streamEl(kind) {
   }
   return running[key];
 }
-function addResult(html, cls, ms) {
-  running.rec.results.push({ html, cls: cls || '', ms: ms != null ? ms : null });
-  running.block.appendChild(resultEl(html, cls, ms));
+function addResult(v, cls, ms, lit) {
+  const r = { v, cls: cls || '', ms: ms != null ? ms : null, lit: !!lit };
+  running.rec.results.push(r);
+  running.block.appendChild(resultEl(r));
   running.hadResult = true; scroll();
 }
-/* The one place a result row is built, so restore and live rendering cannot drift.
-   `html` is always produced by hl()/esc() here, which is what makes it safe to re-inject. */
-function resultEl(html, cls, ms) {
+/* The one place a result row is built, so restore and live rendering cannot drift. Records
+   hold the raw value, never markup: HTML is only ever produced here, by hl()/esc(), so nothing
+   read back from localStorage is trusted as markup. `lit` marks a placeholder (nil, —). */
+function resultEl({ v, cls, ms, lit }) {
   const r = document.createElement('div'); r.className = 'result ' + (cls || '');
-  r.innerHTML = `<span class="val">${html}</span>` + (ms != null ? `<span class="ms">${ms}</span>` : '');
+  r.innerHTML = `<span class="val">${lit ? `<span class="t-par">${esc(v)}</span>` : hl(String(v ?? ''))}</span>`
+    + (ms != null ? `<span class="ms">${esc(ms)}</span>` : '');
   return r;
 }
 
@@ -977,7 +980,7 @@ function saveTranscript() {
     boot: currentBoot,
     blocks: blocks.map(b => ({
       code: clip(b.code), out: clip(b.out), err: clip(b.err), rid: b.rid,
-      results: b.results.map(r => ({ html: clip(r.html), cls: r.cls, ms: r.ms })),
+      results: b.results.map(r => ({ v: clip(r.v), cls: r.cls, ms: r.ms, lit: r.lit })),
     })),
   };
   save(K_TRANSCRIPT, payload, o => o.blocks);
@@ -995,7 +998,11 @@ function restoreBlock(rec) {
   if (rec.out) { const e = document.createElement('div'); e.className = 'stream'; e.textContent = rec.out; block.appendChild(e); }
   if (rec.err) { const e = document.createElement('div'); e.className = 'stream err'; e.textContent = rec.err; block.appendChild(e); }
   (Array.isArray(rec.results) ? rec.results : [])
-    .forEach(r => block.appendChild(resultEl(r && r.html, r && r.cls, r && r.ms)));
+    // rows saved before raw values were stored held markup: keep only its text (DOMParser
+    // builds an inert document - nothing in it runs)
+    .map(r => r && r.v == null && typeof r.html === 'string'
+      ? { ...r, v: new DOMParser().parseFromString(r.html, 'text/html').body.textContent } : r)
+    .forEach(r => r && block.appendChild(resultEl(r)));
   if (rec.rid != null) addInspectButton(block, rec.rid, true);
   transcript.appendChild(block);
 }
@@ -1199,7 +1206,7 @@ function onMsg(m) {
   if (!running) return;
   if (m.t === 'out') { streamEl('out').textContent += m.v; running.rec.out += m.v; }
   else if (m.t === 'err') { streamEl('err').textContent += m.v; running.rec.err += m.v; running.errored = true; }
-  else if (m.t === 'value') addResult(hl(m.v), '');
+  else if (m.t === 'value') addResult(m.v, '');
   else if (m.t === 'ex') running.errored = true;   // the err stream already carries the readable message
   else if (m.t === 'done') {
     // Send must never stay stuck disabled just because rendering this row hit a snag -
@@ -1214,8 +1221,7 @@ function onMsg(m) {
         const lastRec = running.rec.results[running.rec.results.length - 1];
         if (lastRec) lastRec.ms = ms;
       } else if (!running.hadResult) {
-        addResult(running.errored ? '<span class="t-par">—</span>' : '<span class="t-par">nil</span>',
-                  running.errored ? 'ex' : '', ms);
+        addResult(running.errored ? '—' : 'nil', running.errored ? 'ex' : '', ms, true);
       }
       if (m.ns) $('#ns').textContent = m.ns;
       if (m.rid != null) { running.rec.rid = m.rid; addInspectButton(running.block, m.rid); }

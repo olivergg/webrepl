@@ -685,17 +685,21 @@
 (defn- h-page [html-path nrepl-endpoint]
   (let [html (if (.exists (io/file html-path))
                (slurp html-path)
-               (slurp (io/resource "replweb.html")))]
+               (slurp (io/resource "replweb.html")))
+        ;; fresh per response: only the page's own <script> runs, so markup that slips past
+        ;; escaping can't execute anything
+        nonce (format "%032x" (BigInteger. 128 (SecureRandom.)))]
     {:status 200
      :headers {"Content-Type" "text/html; charset=utf-8" "Cache-Control" "no-store"
                "X-Content-Type-Options" "nosniff"
-               ;; Everything is same-origin (relative fetches, inline style/script): 'self'
-               ;; blocks any external request, even one a future bug introduces.
+               ;; 'self' blocks any external request, even one a future bug introduces.
                "Content-Security-Policy"
-               (str "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+               (str "default-src 'self'; script-src 'nonce-" nonce "'; "
                     "style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; "
                     "font-src 'self'; frame-ancestors 'none'; form-action 'self'")}
-     :body (str/replace html "__NREPL__" nrepl-endpoint)}))
+     :body (-> html
+               (str/replace-first "<script>" (str "<script nonce=\"" nonce "\">"))
+               (str/replace "__NREPL__" nrepl-endpoint))}))
 
 (defn- same-origin?
   "Localhost binding alone doesn't stop other sites: the user's own browser can still reach

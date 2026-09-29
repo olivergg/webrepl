@@ -3,8 +3,8 @@
 A single-file [Babashka](https://babashka.org) web console for a running JVM's in-process
 nREPL.
 
-No build step, no dependencies beyond Babashka and `org.httpkit`/`bencode`/`cheshire`
-(pulled via `bb.edn` or your project's classpath). Two files: `replweb.clj` (server +
+No build step, no dependencies beyond Babashka (tested with v1.13), which bundles the
+`org.httpkit`/`bencode`/`cheshire` it uses. Two files: `replweb.clj` (server +
 nREPL client) and `replweb.html` (the page, inlined CSS/JS, zero external requests - see
 Security below).
 
@@ -51,9 +51,10 @@ localhost. Every request must carry a localhost `Host` and, from a browser, a sa
 `Origin`/`Sec-Fetch-Site` (403 otherwise), so other sites can't reach it through your browser
 via CSRF or DNS rebinding. Local processes are kept out by a token: generated once into
 `~/.replweb-token` (owner-only, reused across restarts; delete it to rotate), exchanged on first
-visit for an `HttpOnly; SameSite=Strict` cookie, required on every request (401 otherwise). The page makes no external network requests (system fonts, no CDN)
-and is served with a same-origin `Content-Security-Policy` header, including
-`frame-ancestors 'none'`.
+visit for an `HttpOnly; SameSite=Strict` cookie, required on every request (401 otherwise).
+The page makes no external network requests (system fonts, no CDN) and is served with a
+same-origin `Content-Security-Policy` header: scripts need a per-response nonce, framing is
+denied. Transcripts persist raw values, never markup.
 
 ## Configuration
 
