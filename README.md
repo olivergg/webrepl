@@ -1,17 +1,17 @@
-# replweb
+# webrepl
 
 A single-file [Babashka](https://babashka.org) web console for a running JVM's in-process
 nREPL.
 
 No build step, no dependencies beyond Babashka (tested with v1.13), which bundles the
-`org.httpkit`/`bencode`/`cheshire` it uses. Two files: `replweb.clj` (server +
-nREPL client) and `replweb.html` (the page, inlined CSS/JS, zero external requests - see
+`org.httpkit`/`bencode`/`cheshire` it uses. Two files: `webrepl.clj` (server +
+nREPL client) and `webrepl.html` (the page, inlined CSS/JS, zero external requests - see
 Security below).
 
 ## Usage
 
 ```sh
-./replweb.clj --nrepl 127.0.0.1:5555 [--port 7899] [--notebook PATH] [--config PATH]
+./webrepl.clj --nrepl 127.0.0.1:5555 [--port 7899] [--notebook PATH] [--config PATH]
 ```
 
 Then open the `http://localhost:7899/?token=…` URL it prints (once: it's traded for a cookie,
@@ -40,7 +40,7 @@ drops later, the bridge keeps retrying with backoff and reconnects once it's rea
 - **Persistence** — transcript, taps, pane layout and quick-access filter survive a reload
   (localStorage). A bridge restart is detected via a boot id, so stale result ids are marked
   rather than resolved to the wrong value. "clear history" wipes the transcript; "reset
-  storage" wipes everything replweb keeps in the browser.
+  storage" wipes everything webrepl keeps in the browser.
 - **Production awareness** — shows the target JVM's hostname and `env.profile`; if it looks
   like production, the UI switches to a warning palette.
 
@@ -50,7 +50,7 @@ Binds to `127.0.0.1` only — this is arbitrary eval against a live JVM, never e
 localhost. Every request must carry a localhost `Host` and, from a browser, a same-origin
 `Origin`/`Sec-Fetch-Site` (403 otherwise), so other sites can't reach it through your browser
 via CSRF or DNS rebinding. Local processes are kept out by a token: generated once into
-`~/.replweb-token` (owner-only, reused across restarts; delete it to rotate), exchanged on first
+`~/.webrepl-token` (owner-only, reused across restarts; delete it to rotate), exchanged on first
 visit for an `HttpOnly; SameSite=Strict` cookie, required on every request (401 otherwise).
 The page makes no external network requests (system fonts, no CDN) and is served with a
 same-origin `Content-Security-Policy` header: scripts need a per-response nonce, framing is

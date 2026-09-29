@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Clojure nREPL console</title>
-<!-- Content-Security-Policy is sent as a response header by replweb.clj (h-page), not a
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<!-- Content-Security-Policy is sent as a response header by webrepl.clj (h-page), not a
      <meta>: browsers ignore frame-ancestors in <meta>. -->
 <style>
   :root {
@@ -67,6 +68,15 @@
     transition:background .25s, border-color .25s;
   }
   header.prod { background:var(--danger-wash); border-bottom-color:var(--danger); }
+  /* centred, not baseline: the icon has no baseline to line up with */
+  .brand { display:flex; align-items:center; gap:8px; align-self:center; padding-right:20px; border-right:1px solid var(--line); }
+  .brand img { display:block; }
+  .brand { text-decoration:none; }
+  .brand:hover .brand-name, .brand:focus-visible .brand-name {
+    text-decoration:underline; text-decoration-color:var(--line); text-underline-offset:4px;
+  }
+  .brand-name { font:700 14px var(--mono); color:var(--ink); }
+  .brand-name i { font-style:normal; color:var(--p0); } .brand-name b { color:var(--coral); }
   .field { display:flex; align-items:baseline; gap:8px; }
   .field .k { font-family:var(--serif); font-size:13px; font-style:italic; color:var(--ink-dim); letter-spacing:.02em; }
   header.prod .field .k { color:var(--danger); }
@@ -645,6 +655,7 @@
 </head>
 <body>
 <header id="bar">
+  <a class="brand" href="https://github.com/olivergg/webrepl" target="_blank" rel="noopener noreferrer" title="webrepl on GitHub"><img src="/favicon.svg" alt="" width="20" height="20"><span class="brand-name"><i>(</i>web<b>repl</b><i>)</i></span></a>
   <div class="field"><span class="k">namespace</span><span class="v" id="ns">connecting…</span></div>
   <div class="field"><span class="k">nrepl</span><span class="v">__NREPL__</span></div>
   <div class="field"><span class="k">host</span><span class="v" id="host">—</span></div>
@@ -677,7 +688,7 @@
       <div class="hist-head">
         <span class="ttl">history</span>
         <button class="hist-clear" id="histclear" title="Clear the transcript (keeps ↑↓ recall history)">clear history</button>
-        <button class="hist-clear" id="wipestorage" title="Wipe everything replweb keeps in this browser (transcript, taps, recall history, pane state) and reload">reset storage</button>
+        <button class="hist-clear" id="wipestorage" title="Wipe everything webrepl keeps in this browser (transcript, taps, recall history, pane state) and reload">reset storage</button>
       </div>
       <div class="banner" id="banner">Lost the REPL connection. Retrying…</div>
       <div id="transcript"></div>
@@ -732,11 +743,17 @@ const transcript = $('#transcript'), input = $('#in'), sendBtn = $('#send');
 const bar = $('#bar'), banner = $('#banner'), cmp = $('#cmp'), cmpList = $('#cmplist'), cmpDoc = $('#cmpdoc');
 const dock = $('.dock');
 let running = null;
-const PPRINT_KEY = 'replweb-pprint';
+// Keys were stored under the former name (replweb-*): carry them over once, before any read.
+for (const k of ['pprint', 'history', 'ui', 'transcript', 'taps']) try {
+  const old = localStorage.getItem('replweb-' + k);
+  if (old !== null && localStorage.getItem('webrepl-' + k) === null) localStorage.setItem('webrepl-' + k, old);
+  localStorage.removeItem('replweb-' + k);
+} catch {}
+const PPRINT_KEY = 'webrepl-pprint';
 // on by default: nearly every value worth reading here is a map or a tree. The choice is
 // remembered, so turning it off stays off across reloads.
 let pprint = localStorage.getItem(PPRINT_KEY) !== '0';
-const HISTORY_KEY = 'replweb-history';
+const HISTORY_KEY = 'webrepl-history';
 const MAX_HISTORY = 100;
 const MAX_BLOCKS = 200;      /* transcript rows kept, live and stored */
 const MAX_FIELD  = 20000;    /* per-field cap: one huge pprinted map must not eat the quota */
@@ -744,7 +761,7 @@ const MAX_FIELD  = 20000;    /* per-field cap: one huge pprinted map must not ea
 /* ── persistence ─────────────────────────────────────────────── */
 /* Keys are kept apart on purpose: a tap storm would otherwise rewrite all 200 transcript
    rows on every tapped value. */
-const K_UI = 'replweb-ui', K_TRANSCRIPT = 'replweb-transcript', K_TAPS = 'replweb-taps';
+const K_UI = 'webrepl-ui', K_TRANSCRIPT = 'webrepl-transcript', K_TAPS = 'webrepl-taps';
 
 function load(key, fallback) {
   try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
@@ -978,7 +995,7 @@ $('#histclear').addEventListener('click', clearHistory);
    drift out of sync with what actually gets written. */
 const ALL_STORAGE_KEYS = [HISTORY_KEY, K_UI, K_TRANSCRIPT, K_TAPS, PPRINT_KEY];
 function wipeStorage() {
-  if (!confirm('Wipe everything replweb has stored in this browser (transcript, taps, recall history, pane state) and reload?')) return;
+  if (!confirm('Wipe everything webrepl has stored in this browser (transcript, taps, recall history, pane state) and reload?')) return;
   ALL_STORAGE_KEYS.forEach(k => { try { localStorage.removeItem(k); } catch {} });
   location.reload();
 }

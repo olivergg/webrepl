@@ -1,10 +1,10 @@
 #!/usr/bin/env bb
 ;; A web console for a running JVM's in-process nREPL.
 ;;
-;;     ./replweb.clj [--port 7899] [--nrepl 127.0.0.1:5555] [--notebook PATH] [--config PATH]
+;;     ./webrepl.clj [--port 7899] [--nrepl 127.0.0.1:5555] [--notebook PATH] [--config PATH]
 ;;
 ;; Routes:
-;;   GET  /                     the page (replweb.html, re-read per request)
+;;   GET  /                     the page (webrepl.html, re-read per request)
 ;;   GET  /stream?c=<id>        Server-Sent Events channel for one browser tab
 ;;   POST /eval?c=<id>          body = Clojure code, replies streamed over that channel
 ;;   POST /stop?c=<id>          interrupt the running eval
@@ -24,7 +24,7 @@
 ;;
 ;; Project-specific bits (title, quick-access shortcuts, starter snippets, notebook path,
 ;; home namespace) live in config.edn - see config.example.edn - so this file and
-;; replweb.html stay usable against any nREPL, not just one particular app.
+;; webrepl.html stay usable against any nREPL, not just one particular app.
 
 (require '[bencode.core :as bencode]
          '[cheshire.core :as json]
@@ -172,7 +172,7 @@
                       (when-let [h (get @handlers (:id m))] (h m)))
                     (recur)))
                 (catch Exception e
-                  (println "[replweb] nrepl connection lost:" (.getMessage e))
+                  (println "[webrepl] nrepl connection lost:" (.getMessage e))
                   (reset! conn nil)
                   (when on-lost (on-lost)))))
             "nrepl-reader")
@@ -207,11 +207,11 @@
 (def inspector-setup
   (pr-str
    '(do
-      (def replweb-lim 200)
-      (def replweb-taps (atom {}))     ; idx -> the tapped value itself, capped
-      (def replweb-tap-n (atom 0))
+      (def webrepl-lim 200)
+      (def webrepl-taps (atom {}))     ; idx -> the tapped value itself, capped
+      (def webrepl-tap-n (atom 0))
 
-      (defn replweb-kind [v]
+      (defn webrepl-kind [v]
         (cond (nil? v)                          "nil"
               (map? v)                          "map"
               (vector? v)                       "vector"
@@ -228,26 +228,26 @@
               (instance? Class v)               "scalar"
               :else                             "object"))
 
-      (def replweb-branch-kinds
+      (def webrepl-branch-kinds
         #{"map" "vector" "set" "seq" "array" "jmap" "jcoll" "object"})
 
-      (defn replweb-children
-        "[{:i idx :label str :v value}] - bounded, never realizes more than replweb-lim."
+      (defn webrepl-children
+        "[{:i idx :label str :v value}] - bounded, never realizes more than webrepl-lim."
         [v]
         (try
-          (case (replweb-kind v)
+          (case (webrepl-kind v)
             ("map" "jmap")
             (map-indexed (fn [i e] {:i i :label (pr-str (key e)) :v (val e)})
-                         (take replweb-lim (seq v)))
+                         (take webrepl-lim (seq v)))
 
             ("vector" "set" "seq" "jcoll" "array")
             (map-indexed (fn [i x] {:i i :label (str i) :v x})
-                         (take replweb-lim (seq v)))
+                         (take webrepl-lim (seq v)))
 
             "object"
             (->> (.getDeclaredFields (class v))
                  (remove #(java.lang.reflect.Modifier/isStatic (.getModifiers %)))
-                 (take replweb-lim)
+                 (take webrepl-lim)
                  (map-indexed (fn [i f]
                                 {:i i :label (.getName f)
                                  :v (try (.setAccessible f true) (.get f v)
@@ -256,44 +256,44 @@
             [])
           (catch Throwable t [{:i 0 :label "!" :v (str "<" (.getMessage t) ">")}])))
 
-      (defn replweb-preview [v]
+      (defn webrepl-preview [v]
         (try
           (let [s (binding [*print-length* 12 *print-level* 3] (pr-str v))]
             (if (> (count s) 200) (str (subs s 0 200) "…") s))
           (catch Throwable t (str "<unprintable: " (.getSimpleName (class t)) ">"))))
 
-      (defn replweb-desc [label v]
+      (defn webrepl-desc [label v]
         {:label  label
-         :kind   (replweb-kind v)
-         :preview (replweb-preview v)
+         :kind   (webrepl-kind v)
+         :preview (webrepl-preview v)
          ;; branch? by kind, never by counting children: a lazy seq must not be realized
          ;; just to decide whether to draw a disclosure triangle.
-         :branch (boolean (replweb-branch-kinds (replweb-kind v)))})
+         :branch (boolean (webrepl-branch-kinds (webrepl-kind v)))})
 
-      (defn replweb-node
+      (defn webrepl-node
         "Shallow description of the node at `path` (a vector of child indices) under tap `idx`."
         [idx path]
-        (let [root (get @replweb-taps idx)
-              v    (reduce (fn [acc i] (:v (nth (vec (replweb-children acc)) i nil))) root path)
-              kids (vec (replweb-children v))]
-          (assoc (replweb-desc nil v)
+        (let [root (get @webrepl-taps idx)
+              v    (reduce (fn [acc i] (:v (nth (vec (webrepl-children acc)) i nil))) root path)
+              kids (vec (webrepl-children v))]
+          (assoc (webrepl-desc nil v)
                  :class (when (some? v) (.getName (class v)))
                  :n (count kids)
                  :children (mapv (fn [{:keys [i label v]}]
-                                   (assoc (replweb-desc label v) :i i))
+                                   (assoc (webrepl-desc label v) :i i))
                                  kids))))
 
       ;; Result store, so "inspect" on a transcript row can name the exact value that row
       ;; produced instead of trusting *1 *2 *3 - which shift under it on every later eval,
       ;; and which the tap it used to send would itself have shifted.
-      (def replweb-results (atom {}))   ; result id -> the value, last 100 kept
+      (def webrepl-results (atom {}))   ; result id -> the value, last 100 kept
 
-      (defn replweb-keep [rid v]
-        (swap! replweb-results (fn [m] (-> m (assoc rid v) (dissoc (- rid 100)))))
+      (defn webrepl-keep [rid v]
+        (swap! webrepl-results (fn [m] (-> m (assoc rid v) (dissoc (- rid 100)))))
         nil)
 
-      (defn replweb-tap-result [rid]
-        (when-let [e (find @replweb-results rid)] (tap> (val e)) true))
+      (defn webrepl-tap-result [rid]
+        (when-let [e (find @webrepl-results rid)] (tap> (val e)) true))
 
       ;; The defs above land in whatever namespace this session happens to be in; tab
       ;; sessions live somewhere else entirely, so hand that name back to the bridge and
@@ -304,25 +304,30 @@
 ;; marker so the bridge can reassemble them out of arbitrarily chunked `out`.
 ;;  - bounded queue + .offer: a tap storm drops values instead of growing the heap
 ;;  - fresh queue per run + remove-tap of the previous fn, and the loop exits once it is no
-;;    longer the current pump: restarting replweb against a still-running app would
+;;    longer the current pump: restarting webrepl against a still-running app would
 ;;    otherwise leave the old loop alive, competing for the same queue.
 (def tap-pump
   (pr-str
    '(do
-      (when-let [old (resolve 'replweb-tap-fn)] (remove-tap @old))
-      (def replweb-tap-q (java.util.concurrent.LinkedBlockingQueue. 256))
-      (def replweb-tap-fn (let [q replweb-tap-q] (fn [v] (.offer q v))))
-      (add-tap replweb-tap-fn)
-      (let [q    replweb-tap-q
+      (when-let [old (resolve 'webrepl-tap-fn)] (remove-tap @old))
+      ;; same for a pump left by the bridge under its former name: nil its queue var so the
+      ;; loop exits. Drop once no running app can still carry it.
+      (when-let [old (resolve 'replweb-tap-fn)]
+        (remove-tap @old)
+        (intern *ns* 'replweb-tap-q nil))
+      (def webrepl-tap-q (java.util.concurrent.LinkedBlockingQueue. 256))
+      (def webrepl-tap-fn (let [q webrepl-tap-q] (fn [v] (.offer q v))))
+      (add-tap webrepl-tap-fn)
+      (let [q    webrepl-tap-q
             ;; built from (char 0) rather than written literally, so neither this file nor
             ;; the code sent over the wire carries a raw NUL byte
             mark (str (char 0) "END" (char 0))]
-        (while (identical? q replweb-tap-q)
+        (while (identical? q webrepl-tap-q)
           (when-let [v (.poll q 2 java.util.concurrent.TimeUnit/SECONDS)]
-            (let [idx (swap! replweb-tap-n inc)]
+            (let [idx (swap! webrepl-tap-n inc)]
               ;; hold the value for later drill-down, keeping only the last 100
-              (swap! replweb-taps (fn [m] (-> m (assoc idx v) (dissoc (- idx 100)))))
-              (print (pr-str (assoc (replweb-desc nil v) :i idx))))
+              (swap! webrepl-taps (fn [m] (-> m (assoc idx v) (dissoc (- idx 100)))))
+              (print (pr-str (assoc (webrepl-desc nil v) :i idx))))
             (print mark)
             (flush)))))))
 
@@ -358,7 +363,7 @@
 (defn start-tap-pump! []
   (if-let [session (new-session!)]
     (do
-      ;; The inspector's vars must exist before the pump's loop starts calling replweb-desc.
+      ;; The inspector's vars must exist before the pump's loop starts calling webrepl-desc.
       (let [ns (eval-value session inspector-setup)]
         (when (string? ns) (reset! inspect-ns ns)))
       (reset! inspect-session (new-session!))
@@ -366,21 +371,21 @@
       (request! {"op" "eval" "code" tap-pump "session" session "id" (new-id)}
                 (fn [m]
                   (when-let [o (:out m)] (on-tap-chunk o))
-                  (when-let [e (:err m)] (println "[replweb] tap pump:" e)))))
-    (println "[replweb] tap pump unavailable: could not open a session")))
+                  (when-let [e (:err m)] (println "[webrepl] tap pump:" e)))))
+    (println "[webrepl] tap pump unavailable: could not open a session")))
 
 (defn inspect-node
   "Shallow description of the node at `path` under tapped value `idx`, read back as data."
   [idx path]
   (when-let [session @inspect-session]
-    (eval-value session (format "(%s %d %s)" (iq "replweb-node") idx (pr-str (vec path))))))
+    (eval-value session (format "(%s %d %s)" (iq "webrepl-node") idx (pr-str (vec path))))))
 
 (defn tap-result!
   "Pushes the value a transcript row produced into the inspector, from the inspect session so
    the user's own *1 *2 *3 are left alone."
   [rid]
   (when-let [session @inspect-session]
-    (->> (blocking! {"op" "eval" "code" (format "(%s %d)" (iq "replweb-tap-result") rid)
+    (->> (blocking! {"op" "eval" "code" (format "(%s %d)" (iq "webrepl-tap-result") rid)
                      "session" session})
          (keep :value)
          first
@@ -449,7 +454,7 @@
      (connect! host port #(connect-with-retry! host port reconnect-base-ms))
      (on-reconnected!)
      (catch Exception e
-       (println (format "[replweb] nrepl connect failed (%s) - retrying in %dms"
+       (println (format "[webrepl] nrepl connect failed (%s) - retrying in %dms"
                          (.getMessage e) wait-ms))
        (Thread/sleep ^long wait-ms)
        (connect-with-retry! host port (min reconnect-max-ms (* wait-ms 2)))))))
@@ -578,7 +583,7 @@
    take a duplicate. Without this the inspect button had to send (tap> *N) itself, and that
    eval shifted the very history it was counting on - the reason it worked every other click."
   [session rid]
-  (request! {"op" "eval" "code" (format "(do (%s %d *1) *1)" (iq "replweb-keep") rid)
+  (request! {"op" "eval" "code" (format "(do (%s %d *1) *1)" (iq "webrepl-keep") rid)
              "session" session "id" (new-id)}
             (fn [_])))
 
@@ -687,10 +692,20 @@
   [req]
   (json-res (lint-code (slurp (:body req)))))
 
+;; Inlined so the tool stays two files. Also the header logo (<img src>), so one drawing.
+(def ^:private favicon-svg
+  (str "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\">"
+       "<rect width=\"32\" height=\"32\" rx=\"7\" fill=\"#2B2722\"/>"
+       "<g fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2.8\">"
+       "<path d=\"M10.5 6.5Q4.5 16 10.5 25.5\" stroke=\"#C9A46B\"/>"
+       "<path d=\"M21.5 6.5Q27.5 16 21.5 25.5\" stroke=\"#7FB49C\"/>"
+       "<path d=\"M13.5 11.5 18.5 16l-5 4.5\" stroke=\"#D97F5B\" stroke-width=\"3.2\"/>"
+       "</g></svg>"))
+
 (defn- h-page [html-path nrepl-endpoint]
   (let [html (if (.exists (io/file html-path))
                (slurp html-path)
-               (slurp (io/resource "replweb.html")))
+               (slurp (io/resource "webrepl.html")))
         ;; fresh per response: only the page's own <script> runs, so markup that slips past
         ;; escaping can't execute anything
         nonce (random-hex 128)]
@@ -719,12 +734,16 @@
 ;; Same-origin checks stop other sites, not other local processes: anything on this machine
 ;; can reach 127.0.0.1. The token closes that. Persisted (owner-only) rather than per-run so a
 ;; bridge restart doesn't log every open tab out; delete the file to rotate it.
-(def ^:private token-file (io/file (System/getProperty "user.home") ".replweb-token"))
+(def ^:private token-file (io/file (System/getProperty "user.home") ".webrepl-token"))
 
 (defn- load-or-create-token
   "Anything but 64 hex chars (e.g. left empty by a crash mid-write) is replaced: an empty
    token would match an empty cookie."
   []
+  ;; former name: move rather than orphan a live secret next to the new one
+  (let [old (io/file (.getParent token-file) ".replweb-token")]
+    (when (and (.exists old) (not (.exists token-file)))
+      (Files/move (.toPath old) (.toPath token-file) (make-array java.nio.file.CopyOption 0))))
   (or (when (.exists token-file)
         (re-matches #"[0-9a-f]{64}" (str/trim (slurp token-file))))
     (let [t (random-hex 256)]
@@ -743,7 +762,7 @@
 (defn- router [{:keys [html nrepl-endpoint snippets config port token]}]
   (let [home-ns (:home-ns config)
         ;; per port: browsers share localhost cookies across ports
-        cookie  (str "replweb-" port)
+        cookie  (str "webrepl-" port)
         cookie-re (re-pattern (str "(?:^|;\\s*)" cookie "=([^;]*)"))]
     (fn [req]
       (cond
@@ -758,7 +777,7 @@
 
         (not (token= token (some->> (get-in req [:headers "cookie"]) (re-find cookie-re) second)))
         {:status 401 :headers {"Content-Type" "text/plain; charset=utf-8"}
-         :body "replweb: open the http://localhost:PORT/?token=... URL printed at startup.\n"}
+         :body "webrepl: open the http://localhost:PORT/?token=... URL printed at startup.\n"}
 
         :else
         (case (:uri req)
@@ -777,13 +796,16 @@
                                      :quickAccess (:quick-access config)
                                      :quickAccessTheme (:quick-access-theme config)
                                      :starters (:starters config)})
+          "/favicon.svg" {:status 200 :body favicon-svg
+                          :headers {"Content-Type" "image/svg+xml"
+                                    "X-Content-Type-Options" "nosniff"}}
           "/favicon.ico" {:status 204 :body ""}
           {:status 404 :body ""})))))
 
 ;; ─────────────────────────────────────────────────────────────────────────────
 
 (def ^:private usage
-  "Usage: replweb.clj [options]
+  "Usage: webrepl.clj [options]
 
 Options:
   --nrepl HOST:PORT   nREPL socket to connect to (default 127.0.0.1:5555)
@@ -822,17 +844,17 @@ Options:
     ;; Backgrounded: retrying (with the target JVM possibly not up yet) must not hold up the
     ;; HTTP server - tabs already cope with "no session yet" until this succeeds.
     (future (connect-with-retry! nrepl-host nrepl-port))
-    ;; next to this script, not the cwd: runnable from anywhere, and a stray replweb.html in
+    ;; next to this script, not the cwd: runnable from anywhere, and a stray webrepl.html in
     ;; whatever directory it's started from is never served as the trusted page
     (hk/run-server (router {:html (str (io/file (.getParentFile (.getCanonicalFile (io/file *file*)))
-                                                "replweb.html"))
+                                                "webrepl.html"))
                              :nrepl-endpoint endpoint
                              :snippets snippets :config config :port port :token token})
                    {:port port :ip "127.0.0.1"})
-    (println (format "[replweb] http://localhost:%d/?token=%s  ->  nrepl %s" port token endpoint))
+    (println (format "[webrepl] http://localhost:%d/?token=%s  ->  nrepl %s" port token endpoint))
     (println (if notebook
-               (format "[replweb] %d snippets from %s" (count (snippets)) notebook)
-               "[replweb] no notebook configured - see --notebook or :notebook in config.edn"))
+               (format "[webrepl] %d snippets from %s" (count (snippets)) notebook)
+               "[webrepl] no notebook configured - see --notebook or :notebook in config.edn"))
     @(promise)))
 
 (apply -main *command-line-args*)

@@ -5,7 +5,7 @@
  :home-ns "user"
 
  ;; Path to a Clojure file whose top-level (comment ...) forms become snippets in the
- ;; quick-access pane, grouped by theme (see `themes` in replweb.clj). Optional.
+ ;; quick-access pane, grouped by theme (see `themes` in webrepl.clj). Optional.
  :notebook nil
 
  ;; [title code] pairs pinned at the top of quick access, e.g. shortcuts to hot-reloadable
