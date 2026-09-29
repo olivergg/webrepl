@@ -894,7 +894,7 @@ function streamEl(kind) {
   return running[key];
 }
 function addResult(v, cls, ms, lit) {
-  const r = { v, cls: cls || '', ms: ms != null ? ms : null, lit: !!lit };
+  const r = { v, cls: cls || '', ms: ms ?? null, lit: !!lit };
   running.rec.results.push(r);
   running.block.appendChild(resultEl(r));
   running.hadResult = true; scroll();
@@ -971,7 +971,13 @@ $('#wipestorage').addEventListener('click', wipeStorage);
 /* `blocks` is the stored mirror of the transcript: one record per completed row, oldest
    first, bounded the same way the DOM is. */
 const storedTranscript = load(K_TRANSCRIPT, {});
-let blocks = Array.isArray(storedTranscript.blocks) ? storedTranscript.blocks : [];
+// rows saved before raw values were stored held markup: migrated once, here, so saving keeps
+// them too - only their text survives (DOMParser builds an inert document, nothing in it runs)
+const unmarkup = r => r && r.v == null && typeof r.html === 'string'
+  ? { v: new DOMParser().parseFromString(r.html, 'text/html').body.textContent, cls: r.cls, ms: r.ms }
+  : r;
+let blocks = (Array.isArray(storedTranscript.blocks) ? storedTranscript.blocks : [])
+  .map(b => b && Array.isArray(b.results) ? { ...b, results: b.results.map(unmarkup) } : b);
 const storedBoot = storedTranscript.boot || null;
 
 function saveTranscript() {
@@ -998,10 +1004,6 @@ function restoreBlock(rec) {
   if (rec.out) { const e = document.createElement('div'); e.className = 'stream'; e.textContent = rec.out; block.appendChild(e); }
   if (rec.err) { const e = document.createElement('div'); e.className = 'stream err'; e.textContent = rec.err; block.appendChild(e); }
   (Array.isArray(rec.results) ? rec.results : [])
-    // rows saved before raw values were stored held markup: keep only its text (DOMParser
-    // builds an inert document - nothing in it runs)
-    .map(r => r && r.v == null && typeof r.html === 'string'
-      ? { ...r, v: new DOMParser().parseFromString(r.html, 'text/html').body.textContent } : r)
     .forEach(r => r && block.appendChild(resultEl(r)));
   if (rec.rid != null) addInspectButton(block, rec.rid, true);
   transcript.appendChild(block);

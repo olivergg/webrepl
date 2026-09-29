@@ -66,12 +66,18 @@
    :starters []
    :themes default-themes})
 
+;; What may be spliced into eval'd code as a name: a bare symbol, never a form.
+(def ^:private bare-symbol #"[\w.*+!?<>=/$-]+")
+
+(defn- random-hex [bits]
+  (format (str "%0" (quot bits 4) "x") (BigInteger. (int bits) (SecureRandom.))))
+
 (defn- load-config [path]
   (let [config (merge default-config
                       (when (and path (.exists (io/file path)))
                         (edn/read-string (slurp path))))]
     ;; spliced into (in-ns '...) that runs on every tab open, no click needed
-    (when-not (re-matches #"[\w.*+!?<>=$-]+" (str (:home-ns config)))
+    (when-not (re-matches bare-symbol (str (:home-ns config)))
       (throw (ex-info (str "config: :home-ns must be a bare namespace name, got "
                            (pr-str (:home-ns config))) {})))
     config))
@@ -641,8 +647,7 @@
         sym    (get (params req) "sym")
         prefix (or (get (params req) "prefix") "")]
     (json-res
-     ;; `sym` is spliced into code: accept a bare symbol only, never a form
-     (if (and session sym (re-matches #"[\w.*+!?<>=/$-]+" sym))
+     (if (and session sym (re-matches bare-symbol sym))
        (->> (eval-value session
                         (format "(->> (.getMethods (class %s)) (map (fn [m] (.getName m))) distinct sort vec)"
                                 sym))
@@ -688,7 +693,7 @@
                (slurp (io/resource "replweb.html")))
         ;; fresh per response: only the page's own <script> runs, so markup that slips past
         ;; escaping can't execute anything
-        nonce (format "%032x" (BigInteger. 128 (SecureRandom.)))]
+        nonce (random-hex 128)]
     {:status 200
      :headers {"Content-Type" "text/html; charset=utf-8" "Cache-Control" "no-store"
                "X-Content-Type-Options" "nosniff"
@@ -722,7 +727,7 @@
   []
   (or (when (.exists token-file)
         (re-matches #"[0-9a-f]{64}" (str/trim (slurp token-file))))
-    (let [t (format "%064x" (BigInteger. 256 (SecureRandom.)))]
+    (let [t (random-hex 256)]
       (Files/deleteIfExists (.toPath token-file))
       ;; created owner-only up front, never world-readable even briefly
       (Files/createFile (.toPath token-file)
