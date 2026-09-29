@@ -325,7 +325,7 @@
   @keyframes resultIn { from { opacity:0; transform:translateY(3px); } }
   .result .val { flex:1; white-space:pre-wrap; word-break:break-word; color:var(--ink); max-height:55vh; overflow-y:auto; }
   .result .ms { font-family:var(--ui); font-size:11px; color:var(--ink-dim); white-space:nowrap; }
-  .insp {
+  .insp, .del {
     font-family:var(--ui); font-size:10.5px; color:var(--tap); background:none;
     border:1px solid var(--line); border-radius:4px; padding:1px 7px; cursor:pointer;
     /* dim rather than hidden: hover-only would make it undiscoverable */
@@ -333,13 +333,15 @@
     transition:opacity var(--t-micro), transform var(--t-micro) var(--e-out),
                border-color var(--t-micro), background var(--t-micro);
   }
-  .block:hover .insp, .insp:focus-visible { opacity:1; }
+  .block:hover :is(.insp, .del), .insp:focus-visible, .del:focus-visible { opacity:1; }
   .insp:hover:not(:disabled) {
     border-color:var(--tap); 
     background:var(--tap-wash);
     transform:translateX(4px);
   }
   .insp:disabled { color:var(--ink-dim); cursor:default; }
+  .del { color:var(--ink-dim); margin-left:4px; }
+  .del:hover { color:var(--danger); border-color:var(--danger); background:var(--danger-wash); }
   .result.ex { border-left-color:var(--danger); }
   .result.ex .val { color:var(--danger); }
   .result.stopped { border-left-color:var(--ink-dim); }
@@ -945,6 +947,21 @@ function addInspectButton(block, rid, restored) {
   const ms = row.querySelector(':scope > .ms');
   row.insertBefore(btn, ms);
 }
+/* Own class, not .insp: expireInspect/settleRestored rewrite every .insp. Removes the cell
+   from the page and the saved transcript; the app-side value just ages out of its store. */
+function addDeleteButton(block, rec) {
+  const row = block.querySelector('.result');
+  if (!row || row.querySelector('.del')) return;
+  const btn = document.createElement('button');
+  btn.className = 'del'; btn.textContent = '×';
+  btn.title = 'Remove this cell from the transcript'; btn.setAttribute('aria-label', btn.title);
+  btn.addEventListener('click', () => {
+    const i = blocks.indexOf(rec);
+    if (i >= 0) { blocks.splice(i, 1); saveTranscript(); }
+    block.remove();
+  });
+  row.insertBefore(btn, row.querySelector(':scope > .ms'));
+}
 const fmtMs = ms => ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(2) + ' s';
 function scroll() { const m = document.querySelector('main'); m.scrollTop = m.scrollHeight; }
 
@@ -1006,6 +1023,7 @@ function restoreBlock(rec) {
   (Array.isArray(rec.results) ? rec.results : [])
     .forEach(r => r && block.appendChild(resultEl(r)));
   if (rec.rid != null) addInspectButton(block, rec.rid, true);
+  addDeleteButton(block, rec);
   transcript.appendChild(block);
 }
 
@@ -1227,6 +1245,7 @@ function onMsg(m) {
       }
       if (m.ns) $('#ns').textContent = m.ns;
       if (m.rid != null) { running.rec.rid = m.rid; addInspectButton(running.block, m.rid); }
+      addDeleteButton(running.block, running.rec);
       blocks.push(running.rec); saveTranscript();
       scroll();
     } catch (err) { console.error('rendering `done` row failed:', err); }
