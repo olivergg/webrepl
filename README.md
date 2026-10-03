@@ -1,5 +1,7 @@
 # webrepl
 
+[![AI-assisted](https://img.shields.io/badge/AI--assisted-LLM-blueviolet)](#ai-disclosure)
+
 A browser console for the nREPL running inside a JVM. It's one [Babashka](https://babashka.org)
 script plus one HTML page.
 
@@ -91,6 +93,10 @@ Most ideas come from tools that do this properly from an editor:
   [Gorilla REPL](https://github.com/JonyEpsilon/gorilla-repl) and Jupyter: notebooks built on
   top of a REPL.
 - [nREPL](https://nrepl.org), whose built-in completion and lookup ops do the heavy lifting.
+
+## AI disclosure
+
+Large parts of this code were written with an LLM agent, then reviewed and tested by me.
 
 ## License
 
